@@ -393,7 +393,7 @@ class VlxServer {
     struct TpsSample {
         int64_t ts_ms;
         int tokens;
-        double inference_ms;
+        double decode_ms;   // 纯解码时间（不含视觉链/prefill）
     };
     std::deque<TpsSample> tps_samples_;
     double last_decode_tps_ = 0.0;
@@ -403,12 +403,12 @@ class VlxServer {
         for (int win : {10, 60}) {
             int64_t oldest = now;
             long long tokens = 0;
-            double inf_ms = 0.0;
+            double dec_ms = 0.0;
             int n = 0;
             for (auto it = tps_samples_.rbegin(); it != tps_samples_.rend(); ++it) {
                 if (it->ts_ms < now - int64_t(win) * 1000) break;
                 tokens += it->tokens;
-                inf_ms += it->inference_ms;
+                dec_ms += it->decode_ms;
                 oldest = it->ts_ms;
                 ++n;
             }
@@ -417,7 +417,7 @@ class VlxServer {
             out[k] = {{"tps", n ? double(tokens) / elapsed : 0.0},
                       {"tokens", tokens},
                       {"requests", n},
-                      {"active_tps", inf_ms > 0 ? double(tokens) / (inf_ms / 1000.0) : 0.0}};
+                      {"active_tps", dec_ms > 0 ? double(tokens) / (dec_ms / 1000.0) : 0.0}};
         }
         out["last_decode_tps"] = last_decode_tps_;
         return out;
@@ -892,16 +892,16 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
             finished_runs_.fetch_add(1);
             {
                 const int64_t ct_now = job->finished_ms;
-                const double inf = job->timings.value("inference_ms", 0.0);
+                const double dec = vlx_seek_result_decode_ms(w.ctx);
                 const int ct_n = job->result.contains("completion_tokens")
                                      ? job->result["completion_tokens"].get<int>()
                                      : 0;
                 TpsSample sample;
                 sample.ts_ms = ct_now;
                 sample.tokens = ct_n;
-                sample.inference_ms = inf;
+                sample.decode_ms = dec;
                 tps_samples_.push_back(sample);
-                if (inf > 0 && ct_n > 0) last_decode_tps_ = double(ct_n) / (inf / 1000.0);
+                if (dec > 0 && ct_n > 0) last_decode_tps_ = double(ct_n) / (dec / 1000.0);
                 while (!tps_samples_.empty() &&
                        tps_samples_.front().ts_ms < ct_now - 60000) {
                     tps_samples_.pop_front();
