@@ -44,13 +44,20 @@ deploy/
 | 项 | 要求 |
 |---|---|
 | GPU | NVIDIA，实测 RTX 5880 Ada（sm_89）48 GB；单实例需 9–14 GiB 显存 |
-| CUDA | 12.8（`nvcc` 在 PATH；用 `VLX_CUDA_ARCH` 指定架构，默认 `89`） |
+| CUDA | **编译/运行使用 toolkit 12.8.93**（`deploy/env.sh` 固定 `CUDA_HOME=/usr/local/cuda-12.8`，产物链接 `libcudart.so.12`）；用 `VLX_CUDA_ARCH` 指定架构，默认 `89`。注意 `nvidia-smi` 报的 `CUDA Version: 13.0` 是**驱动支持上限**，不是构建用的 toolkit |
 | 编译 | gcc 13、cmake ≥ 3.14、32 线程编译约 2 分钟 |
 | 上游源码 | `om-ai-lab/VLX-Seek`，且已 `git submodule update --init --recursive`（`cpp_ggml/third_party/llama.cpp`） |
 | 模型权重 | 4 个 GGUF，约 12.6 GiB（**不在本仓库**）：`vlx-10b-llm-q8_0`、`vlx-vision-10b-{f16,q8_0}`、`wedetect-base-uni-f32` |
 | 服务依赖 | 本机已验证：OpenSSL 开发包（HTTPS 图像 URL 需要）；无新增 Python 依赖 |
 
 模型可从 Hugging Face `omlab/VLX-Seek-1.5-10B-GGUF` 获取，放到任意目录后用 `VLX_GGUF_DIR` 指向。
+
+### 关于 CUDA 12.8 / 13.0
+
+- `nvidia-smi` 的 `CUDA Version: 13.0` = **驱动（580.173.02）支持的最高 runtime 版本**，不代表装了 13.0 工具链
+- 本项目实际用 **12.8.93** 编译：构建日志 `Found CUDAToolkit: ... 12.8.93`，`ldd` 显示 `libcudart.so.12` / `libcublas.so.12`
+- 本机 `/usr/local/cuda` 指向 `cuda-13.0`，但 `deploy/env.sh` 显式固定 12.8 保证可复现；
+  想用 13.0 构建：`CUDA_HOME=/usr/local/cuda-13.0 VLX_BUILD_DIR=$PWD/cpp_ggml/build-cuda13 ./deploy/build.sh`（未验证）
 
 ## 快速开始
 
@@ -242,7 +249,7 @@ cp deploy/.env.example deploy/.env      # 按需修改 HOST/PORT/GPU/INSTANCES/E
 - `vlx-seek.service` 里的 `User=`、`WorkingDirectory=`、`EnvironmentFile=` 是绝对路径，**换机器需要改这三处**
 - 日志：`journalctl -u vlx-seek -f`
 
-## 实测性能（RTX 5880 Ada 48 GB / i9-14900K / CUDA 12.8）
+## 实测性能（RTX 5880 Ada 48 GB / i9-14900K / CUDA toolkit 12.8）
 
 | 项 | 数值 |
 |---|---|

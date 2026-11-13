@@ -16,7 +16,10 @@ export VLX_IMAGES="$DEPLOY_DIR/test_images"
 export VLX_OUT="$DEPLOY_DIR/out"
 export VLX_LOGS="$DEPLOY_DIR/logs"
 
-# CUDA 工具链
+# CUDA 工具链：显式固定 toolkit 12.8（nvcc 12.8.93，产物链接 libcudart.so.12）。
+# 注意本机 /usr/local/cuda 指向 cuda-13.0，但 nvidia-smi 报的 "CUDA Version: 13.0"
+# 只是驱动支持上限，不代表构建用的 toolkit。固定 12.8 保证构建可复现；
+# 想用 13.0 构建：CUDA_HOME=/usr/local/cuda-13.0 ./deploy/build.sh（未验证）
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"

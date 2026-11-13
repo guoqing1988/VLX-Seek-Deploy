@@ -48,7 +48,23 @@
 └── wedetect-base-uni-f32.gguf   0.40 GiB  候选区域检测器（必须 f32）
 ```
 
-工具链版本：gcc 13.1、cmake 3.22、CUDA 12.8（驱动 580.173 / CUDA 13.0 兼容）、目标架构 `sm_89`。
+工具链版本：gcc 13.1、cmake 3.22、**CUDA toolkit 12.8.93**（`nvcc` 12.8，产物链接 `libcudart.so.12`）、目标架构 `sm_89`。
+
+### CUDA 版本口径（12.8 还是 13.0？）
+
+| 来源 | 显示 | 含义 |
+|---|---|---|
+| `nvidia-smi` 右上角 | `CUDA Version: 13.0` | **驱动支持的最高 runtime 版本**（驱动 580.173.02），不是已安装的 toolkit |
+| `nvcc --version` | `release 12.8, V12.8.93` | 实际使用的编译器 |
+| 构建日志 | `Found CUDAToolkit: /usr/local/cuda-12.8/include (12.8.93)` | 实际链接的 toolkit |
+| `ldd vlx-seek-server` | `libcudart.so.12`、`libcublas.so.12` | 运行时加载的是 12.x 库 |
+
+`deploy/env.sh` 把 `CUDA_HOME` 固定为 `/usr/local/cuda-12.8`（本机 `/usr/local/cuda` 指向 `cuda-13.0`）。
+本机同时装了 13.0，但本项目**未使用 13.0 构建**；要切换：
+
+```bash
+CUDA_HOME=/usr/local/cuda-13.0 VLX_BUILD_DIR=$PWD/cpp_ggml/build-cuda13 ./deploy/build.sh   # 未验证
+```
 
 ## 3. 构建（已执行，约 1 分 50 秒）
 
