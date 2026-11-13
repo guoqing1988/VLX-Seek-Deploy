@@ -33,6 +33,7 @@ deploy/
 ├── .env.example            # 服务环境变量模板（systemd EnvironmentFile）
 ├── vlx-seek.service        # systemd unit（软链安装）
 ├── install-service.sh      # systemd 安装/卸载/状态/重启
+├── patches/                # 上游 C API 修复补丁（构建时自动 apply/revert）
 ├── test_images/            # 自测图片（9 张）
 ├── web/index.html          # 单文件 Web 控制台（上传图片 / 7 个任务 / 看带框图）
 ├── nginx/                  # nginx 配置 :8188（静态页面 + API 反代）与软链脚本
@@ -51,7 +52,7 @@ deploy/
 | GPU | NVIDIA，实测 RTX 5880 Ada（sm_89）48 GB；单实例需 9–14 GiB 显存 |
 | CUDA | **编译/运行使用 toolkit 13.0.88**（`deploy/env.sh` 固定 `CUDA_HOME=/usr/local/cuda-13.0`，产物链接 `libcudart.so.13`）；用 `VLX_CUDA_ARCH` 指定架构，默认 `89`。`nvidia-smi` 报的 `CUDA Version: 13.0` 是驱动（580.173.02）支持上限，与本机 toolkit 一致；12.8 也验证过（输出逐 token 一致） |
 | 编译 | gcc 13、cmake ≥ 3.14、32 线程编译约 2 分钟 |
-| 上游源码 | `Asher-1/VLX-Seek-GGML`（**必须用这个仓库**，它含 `cpp_ggml/`），且已 `git submodule update --init --recursive`；C API 修复由 `deploy/patches/*.patch` 在构建时自动应用（源码 dirty 属预期） |
+| 上游源码 | `Asher-1/VLX-Seek-GGML`（**必须用这个仓库**，它含 `cpp_ggml/`），且已 `git submodule update --init --recursive`；C API 修复由 `deploy/patches/*.patch` 在构建时自动应用、构建后自动还原（源码保持干净） |
 | 模型权重 | 4 个 GGUF，约 12.6 GiB（**不在本仓库**）：`vlx-10b-llm-q8_0`、`vlx-vision-10b-{f16,q8_0}`、`wedetect-base-uni-f32` |
 | 服务依赖 | 本机已验证：OpenSSL 开发包（HTTPS 图像 URL 需要）；无新增 Python 依赖 |
 
@@ -73,9 +74,9 @@ git clone https://github.com/Asher-1/VLX-Seek-GGML.git VLX-Seek-GGML
 cd VLX-Seek-GGML
 git submodule update --init --recursive
 
-# 2. 把本仓库的 deploy/ 放到项目根目录
-git clone https://github.com/guoqing1988/VLX-Seek-Deploy.git /tmp/VLX-Seek-Deploy
-cp -r /tmp/VLX-Seek-Deploy/deploy .
+# 2. 把部署目录接入项目根目录（推荐软链，单一来源；也可 cp -r 复制）
+git clone https://github.com/guoqing1988/VLX-Seek-Deploy.git /data/www/VLX-Seek-Deploy
+ln -s /data/www/VLX-Seek-Deploy/deploy deploy
 
 # 3. 指向模型目录并构建
 export VLX_GGUF_DIR=/data/models/VLX-Seek-1.5-10B-GGUF
@@ -92,14 +93,28 @@ export VLX_GGUF_DIR=/data/models/VLX-Seek-1.5-10B-GGUF
 python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```
 
-> `deploy/` 必须位于 VLX-Seek 项目根目录下：脚本用 `deploy/../cpp_ggml` 定位上游构建。
+> `deploy/` 必须位于 VLX-Seek 项目根目录下（**可以是软链**）：`deploy/server/build-server.sh` 会把
+> 项目根显式传给 CMake（`-DVLX_ROOT`），所以软链后 CMake 也不会把路径解析到部署仓库那边。
+>
+> C API 修复以 `deploy/patches/*.patch` 分发：`build-server.sh` 在配置前自动 apply，
+> 构建结束（含失败）自动还原，**上游源码始终保持干净**。
 
 ## 常驻推理服务
 
 ```bash
-./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
+./deploy/server/build-server.sh          # 构建服务（自动 apply/revert 上游 patch）
 ./deploy/server/serve.sh --preload       # 0.0.0.0:8110（本机 .env；脚本默认 8100），2 实例
-python3 deploy/server/test_server.py     # 66 项验收；若已用 systemd 托管，先 sudo systemctl stop vlx-seek
+
+# 验收（78 项；会起 2 实例，先让出显存）
+python3 deploy/server/test_server.py
+```
+
+长期运行用 systemd，外加 nginx 控制台：
+
+```bash
+cp deploy/.env.example deploy/.env       # 按需改 HOST/PORT/GPU/INSTANCES/MAX_IMAGE_SIDE/API_KEY
+./deploy/install-service.sh install      # 软链 unit + enable + start
+./deploy/nginx/install-nginx.sh install  # 软链 nginx 配置（:8188）+ reload
 ```
 
 服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。

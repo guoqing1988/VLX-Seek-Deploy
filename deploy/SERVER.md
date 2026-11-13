@@ -38,6 +38,14 @@ cd /data/www/VLX-Seek-GGML
 ./deploy/server/serve.sh               # 0.0.0.0:8110（本机 .env），2 实例, 空闲 300s 卸载
 ```
 
+构建脚本的两个行为：
+
+- **上游 patch 自动应用/还原**：`deploy/patches/*.patch` 在 CMake 配置前 apply，
+  构建结束（含失败，`trap EXIT`）自动 `--reverse` 还原 → 上游源码保持干净；
+  重复构建会再次应用（幂等）
+- **项目根显式传递**：`deploy/` 可以是软链（指向部署仓库），脚本用
+  `-DVLX_ROOT=<项目根>` 告诉 CMake，避免它把软链解析成部署仓库路径
+
 `serve.sh` 可用的环境变量：`PORT` `HOST` `INSTANCES` `IDLE_UNLOAD_S` `PRECISION` `DEVICE`，
 其余参数透传：
 
@@ -205,6 +213,7 @@ curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
 - 未带/带错：`401` + `WWW-Authenticate: Bearer`，响应体 `{"error":"missing or invalid API key"}`
 - 比较是恒定时间的；key 不写日志，`/v1/vlx/info` 只暴露 `auth_enabled` 与头格式，不回显 key
 - 修改 `.env` 后 `./deploy/install-service.sh restart`
+- Web 控制台另需 `./deploy/nginx/install-nginx.sh install`（见 §3.7）
 
 ### 3.3 OpenAI 兼容接口（同步）
 
@@ -699,7 +708,7 @@ MAX_IMAGE_TOKENS=3800    # 0 = 不限制
 ## 9. 验收测试
 
 ```bash
-python3 deploy/server/test_server.py    # 65 项断言，自动起停服务
+python3 deploy/server/test_server.py    # 78 项断言，自动起停服务
 ```
 
 覆盖：冷启动不加载 → 首请求冷启动标记/加载耗时/结果框 → 不同尺寸连续请求（bug #3 回归）→
