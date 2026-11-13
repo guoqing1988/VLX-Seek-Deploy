@@ -1112,11 +1112,8 @@ std::shared_ptr<Job> VlxServer::enqueue_infer(const json& body, httplib::Respons
                         "application/json");
         return nullptr;
     }
-    if (region_task(task) && boxes.empty()) {
-        res.status = 400;
-        res.set_content(json{{"error", "region tasks require bbox_list"}}.dump(), "application/json");
-        return nullptr;
-    }
+    // 区域任务不强制 bbox_list：与官方一致，省略时由 WeDetect 生成候选框，
+    // target_region_indexes 就指向这些自动候选框。
 
     // 队列容量
     {

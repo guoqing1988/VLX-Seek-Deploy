@@ -272,6 +272,156 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 | 504 | OpenAI 接口同步等待超时（`--openai-timeout-s`） |
 | 任务内错误 | 任务 `state=failed`，`error` 字段给出原因（如 `model load failed: ...`、`image decode failed`） |
 
+### 3.5 任务（task）详解
+
+7 个任务共用同一条链路：**图像 + task + text（+ 可选候选框 / 区域索引）→ `answer` + `result_bbox_list`**。
+区别只在 `text` 的语义、是否需要引用区域，以及 `answer` 的形态。
+
+#### 通用输入字段
+
+| 字段 | 说明 |
+|---|---|
+| `image` | 必填。`data:`/裸 base64 或 http(s) URL；超过 `--max-image-tokens` 会自动等比缩小 |
+| `task` | 默认 `detection`，见下表 |
+| `text` | 语义随任务变化（类别 / 指代表达 / 问题 / 区域索引占位），见各任务示例 |
+| `lang` | `en`（默认）/ `zh`：只影响**任务模板**的语言，不限制回答语言 |
+| `bbox_list` | 可选。`[[x1,y1,x2,y2],...]`（原图像素，最多 100）。省略时由 WeDetect 自动生成 100 个候选框 |
+| `target_region_indexes` | 仅 `brief_region_caption` / `region_ocr` 需要。索引指向候选框（你传的 bbox_list 或自动候选框，从 0 开始） |
+
+#### 7 个任务
+
+| task | 用途 | `text` 怎么写 | 候选框 | 区域索引 | 实测耗时（640×480~1280×930） |
+|---|---|---|---|---|---|
+| `vqa` | 通用视觉问答，自由文本 | 自然语言问题 | 不需要 | 不需要 | 0.4–2.8 s（视图像大小） |
+| `detection` | 开放词汇检测（多类别、多实例） | 类别/描述，`;` 分隔多个 | 自动或自传 | 不需要 | ~0.9 s |
+| `grounding_single` | 指代表达定位，只给一个实例 | 一句指代（`the orange on the left`） | 自动或自传 | 不需要 | ~0.4 s |
+| `counting` | 计数并返回对象索引 | 目标描述（可多个，`;` 分隔） | 自动或自传 | 不需要 | 1–4.3 s |
+| `reasoning_detection` | 先推理再定位（输出 `<think>`） | 需要推理的问题/描述 | 自动或自传 | 不需要 | 4–6.7 s（输出长） |
+| `brief_region_caption` | 描述指定区域 | 占位文本（如 `describe`，会被索引替换） | 自动或自传 | **必填** | ~1.8 s |
+| `region_ocr` | 读取指定区域的文字 | 占位文本（如 `read`） | 自动或自传 | **必填** | ~1.8 s |
+
+#### vqa — 通用问答
+
+```json
+{"task":"vqa","text":"图里有什么水果？","lang":"zh","image":"data:image/jpeg;base64,..."}
+```
+
+```json
+{"answer":"图片中有苹果和橙子。","result_bbox_list":[]}
+```
+
+不引用任何候选框，`result_bbox_list` 恒为空；回答语言由问题本身决定。
+
+#### detection — 开放词汇检测
+
+```json
+{"task":"detection","text":"orange; apple","lang":"zh","image":"data:image/jpeg;base64,..."}
+```
+
+```json
+{"answer":"<ground>orange</ground><objects><obj6><obj3><obj2><obj5><obj4></objects> <ground>apple</ground><objects><obj1><obj0></objects>",
+ "result_bbox_list":[
+   {"object_index":"<obj6>","label":"orange","xmin":13,"ymin":100,"xmax":141,"ymax":229},
+   {"object_index":"<obj3>","label":"orange","xmin":137,"ymin":107,"xmax":270,"ymax":232}]}
+```
+
+一个 `<ground>` 对应一个类别，`<objects>` 里是选中的候选框索引；`;` 分隔可一次查多类。
+实测 7 个框、411 prompt tokens / 19 completion tokens。
+
+#### grounding_single — 指代表达定位
+
+```json
+{"task":"grounding_single","text":"the orange on the left","lang":"en","image":"data:image/jpeg;base64,..."}
+```
+
+```json
+{"answer":"<ground>the orange on the left</ground><objects><obj6></objects>",
+ "result_bbox_list":[{"object_index":"<obj6>","label":"the orange on the left",
+                      "xmin":13,"ymin":100,"xmax":141,"ymax":229}]}
+```
+
+只返回一个实例；`label` 是整句指代表达（不是类别词），下游要展示类别请自己映射。
+
+#### counting — 计数
+
+```json
+{"task":"counting","text":"person; car","lang":"en","image":"data:image/jpeg;base64,..."}
+```
+
+```json
+{"answer":"The total number of <ground>person</ground><objects><obj4><obj9><obj3>…</objects> is 11. "
+          "The total number of <ground>car</ground><objects><obj21><obj49><obj33>…</objects> is 26.",
+ "result_bbox_list":[{"object_index":"<obj4>","label":"person","xmin":788,"ymin":202,"xmax":848,"ymax":285}]}
+```
+
+- 数量看 `answer` 里的自然语言（`is 11`），框列表是它逐个数出来的实例（本例 37 个框）
+- 输出比检测长（69 tokens），耗时也更高（4.3 s）
+
+#### reasoning_detection — 先推理再定位
+
+```json
+{"task":"reasoning_detection","text":"which object is used for drinking?","lang":"en","image":"data:image/jpeg;base64,..."}
+```
+
+```json
+{"answer":"<think> OK, the user needs us to detect the object used for drinking. … Step 2: …</think>…<ground>…</ground><objects><obj21><obj31></objects>",
+ "result_bbox_list":[{"object_index":"<obj21>","label":"which object is used for drinking?",
+                      "xmin":977,"ymin":671,"xmax":1007,"ymax":711}]}
+```
+
+- `answer` 先有 `<think>` 段，再给结论；需要展示推理过程时直接用它
+- 输出可达 450 tokens、耗时 6.7 s；服务级 `--max-new-tokens` 要留足（默认 2048 够）
+
+#### brief_region_caption — 区域描述
+
+```json
+{"task":"brief_region_caption","text":"describe","lang":"en",
+ "image":"data:image/jpeg;base64,...","target_region_indexes":[0]}
+```
+
+```json
+{"answer":"<ground>Clear plastic bottle with blue cap and label</ground><objects><obj0></objects>",
+ "result_bbox_list":[{"object_index":"<obj0>","label":"Clear plastic bottle with blue cap and label",
+                      "xmin":680,"ymin":189,"xmax":747,"ymax":396}]}
+```
+
+- 省略 `bbox_list` 时，`target_region_indexes` 指向 WeDetect 自动生成的候选框（与官方 CLI 一致）
+- 传了 `bbox_list` 时，索引指向你传入的框（顺序即你给的顺序）
+
+#### region_ocr — 区域文字识别
+
+```json
+{"task":"region_ocr","text":"read","lang":"en",
+ "image":"data:image/jpeg;base64,...","target_region_indexes":[0]}
+```
+
+```json
+{"answer":"<ground>3H86</ground><objects><obj0></objects>",
+ "result_bbox_list":[{"object_index":"<obj0>","label":"3H86",
+                      "xmin":94,"ymin":269,"xmax":620,"ymax":545}]}
+```
+
+识别结果在 `<ground>` 里；一块区域对应一个框。
+
+#### 返回字段总表
+
+| 字段 | 说明 |
+|---|---|
+| `answer` | 模型原始输出。检测/计数/区域类含 `<ground>标签</ground><objects><objN>…</objects>`；VQA 是纯文本；推理类含 `<think>` |
+| `result_bbox_list` | 从 `answer` 解析出的框：`object_index`（对应的 `<objN>`）、`label`、`xmin/ymin/xmax/ymax`（**原图像素**，已按缩放比例映射回来） |
+| `prompt_tokens` / `completion_tokens` | 输入（图像 token + 100 区域 token + 文本）/ 输出 token 数 |
+| （服务层）`timings_ms` | `preprocess_ms`（含 WeDetect）/ `inference_ms` / `postprocess_ms` / `e2e_ms` |
+| （服务层）`image` | `original_width/height`、`width/height`（实际送模型）、`resized`、`scale` |
+
+#### 常见坑
+
+1. **`label` 来自 `<ground>`**：`grounding_single` / `reasoning_detection` 里它是整句问题，不是类别词。
+2. **候选框上限 100**：不传 `bbox_list` 时由 WeDetect 生成，密集/极小目标可能不在候选集里 → 自传 bbox_list 或提高分辨率预算。
+3. **区域任务的索引语义**随输入变化：自传 `bbox_list` → 指向你的框；省略 → 指向自动候选框。同一索引在两种模式下不是同一个框。
+4. **`vqa` 不需要候选框**，传 `bbox_list` 也会被忽略（但服务端仍会校验格式）。
+5. **输出必须解析**：`<objN>` 是模型协议的一部分；`result_bbox_list` 已帮你解析并映射回原图。
+6. **`reasoning_detection` 慢**：输出可达 450 tokens，端到端 6.7 s，不适合高并发低延迟场景。
+
 ## 4. 模型生命周期（实测）
 
 | 场景 | 行为 | 实测 |

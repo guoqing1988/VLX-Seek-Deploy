@@ -106,6 +106,35 @@ curl -s localhost:8110/v1/vlx/jobs/job-1
 
 运维接口：`GET /healthz`、`GET /v1/vlx/info`、`POST /v1/vlx/unload?wait=1`、`GET /metrics`。
 
+### 任务（task）
+
+7 个任务共用同一套输入/输出，区别在 `text` 的语义和是否需要区域索引：
+
+| task | 用途 | `text` 写法 | bbox_list | target_region_indexes |
+|---|---|---|---|---|
+| `vqa` | 通用视觉问答（纯文本） | 自然语言问题 | 不需要 | 不需要 |
+| `detection` | 开放词汇检测（多类多实例） | `orange; apple` | 自动/自传 | 不需要 |
+| `grounding_single` | 指代表达定位（只给一个） | `the orange on the left` | 自动/自传 | 不需要 |
+| `counting` | 计数 + 返回实例索引 | `person; car` | 自动/自传 | 不需要 |
+| `reasoning_detection` | 先推理再定位（含 `<think>`） | 需要推理的问题 | 自动/自传 | 不需要 |
+| `brief_region_caption` | 描述指定区域 | 占位文本 | 自动/自传 | **必填** |
+| `region_ocr` | 读取指定区域文字 | 占位文本 | 自动/自传 | **必填** |
+
+```json
+POST /v1/vlx/infer
+{"task":"detection","text":"orange; apple","lang":"zh","image":"data:image/jpeg;base64,..."}
+
+→ {"answer":"<ground>orange</ground><objects><obj6><obj3>…</objects> <ground>apple</ground><objects><obj1><obj0></objects>",
+   "result_bbox_list":[{"object_index":"<obj6>","label":"orange","xmin":13,"ymin":100,"xmax":141,"ymax":229}],
+   "prompt_tokens":411,"completion_tokens":19}
+```
+
+- `answer` 是模型原始输出（检测/区域类含 `<ground>/<objects>/<objN>`；VQA 纯文本；推理类含 `<think>`）
+- `result_bbox_list` 已把 `<objN>` 解析成**原图像素坐标**（缩放已映射回来）
+- 不传 `bbox_list` 时由 WeDetect 自动生成 100 个候选框；区域任务的索引默认指向这些自动候选框
+
+每个任务的真实输入输出、返回字段和常见坑见 [`deploy/SERVER.md` §3.5](deploy/SERVER.md)。
+
 ### OpenAI 兼容接口
 
 ```python
