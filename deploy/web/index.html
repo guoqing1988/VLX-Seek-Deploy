@@ -128,7 +128,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.11</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.12</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -251,14 +251,12 @@ function histRender() {
   if (!box) return;
   const empty = box.querySelector('.empty');
   if (empty) empty.remove();
-  const p2 = (n) => String(n).padStart(2, '0');
   list.forEach((r) => {
-    const ts = new Date(r.ts);
-    const time = `${p2(ts.getMonth() + 1)}-${p2(ts.getDate())} ${p2(ts.getHours())}:${p2(ts.getMinutes())}:${p2(ts.getSeconds())}`;
+    const time = fmtTime(r.ts);
     const ok = r.state === 'done';
     const el = cardFor(`${r.task || 'job'} · ${time}`);
     el.dataset.histId = r.id;
-    paintResult(el, r.job, r.wallMs);
+    paintResult(el, r.job, r.wallMs, r.ts);
     const im = el.querySelector('.viz');
     const ph = el.querySelector('.vizph');
     if (r.thumb) {
@@ -608,6 +606,12 @@ async function submitOne(name, image) {
   }
 }
 
+function fmtTime(ms) {
+  const d = new Date(ms);
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
@@ -620,7 +624,7 @@ function prettyAnswer(a) {
                .replace(/&lt;\/think&gt;/g, '<span class="mark">&lt;/think&gt;</span>');
 }
 
-function paintResult(el, job, wallMs) {
+function paintResult(el, job, wallMs, ts) {
   finishCard(el);
   const ph = el.querySelector('.vizph'); if (ph) ph.remove();
   const res = job.result || {};
@@ -645,6 +649,7 @@ function paintResult(el, job, wallMs) {
         ? `targets <b>[${rq.target_region_indexes.join(',')}]</b>` : '',
     rq.render_png ? `render_png <b>是</b>` : '',
     `图片 <b>${mb}</b>`,
+    ts ? `生成时间 <b>${fmtTime(ts)}</b>` : '',
     `总耗时 <b>${(wallMs / 1000).toFixed(2)} s</b>`,
     `服务端 <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
   ].filter(Boolean).join(' · ');
@@ -677,9 +682,10 @@ function paintResult(el, job, wallMs) {
 
 // 结果渲染完成后：异步取图 + 写本地运行记录（先写文本，图到了再补缩略图）
 async function renderJob(el, job, wallMs) {
-  paintResult(el, job, wallMs);
+  const doneAt = Date.now();          // 生成（完成）时间
+  paintResult(el, job, wallMs, doneAt);
   const rec = () => ({
-    id: job.job_id, ts: Date.now(), state: job.state, wallMs,
+    id: job.job_id, ts: doneAt, state: job.state, wallMs,
     task: (job.request || {}).task, answer: (job.result || {}).answer || '',
     job: slimJob(job), thumb: '',
   });
