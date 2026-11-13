@@ -59,6 +59,9 @@
   .card .body{display:grid;grid-template-columns:minmax(260px,42%) 1fr;gap:14px;padding:14px}
   @media(max-width:760px){.card .body{grid-template-columns:1fr}}
   .card img.viz{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
+  .req{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px;margin:0 0 10px;
+       padding-bottom:8px;border-bottom:1px dashed var(--line)}
+  .req b{color:var(--fg);font-weight:600}
   .meta{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}
   .meta b{color:var(--fg);font-weight:600}
   pre.answer{white-space:pre-wrap;word-break:break-word;background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px;margin:0;max-height:220px;overflow:auto;font-size:13px}
@@ -111,7 +114,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.6</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.7</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -403,6 +406,7 @@ function cardFor(name) {
       <div>
         <div class="loading"><span class="spinner"></span><span class="ltext">排队中…</span></div>
         <div class="progress"><i></i></div>
+        <div class="req" style="display:none"></div>
         <pre class="answer" style="display:none"></pre>
         <details style="display:none"><summary>框列表</summary><div class="boxes"></div></details>
       </div>
@@ -417,6 +421,7 @@ function finishCard(el) {
   const p = el.querySelector('.progress'); if (p) p.remove();
   el.querySelector('.answer').style.display = '';
   el.querySelector('details').style.display = '';
+  const rq = el.querySelector('.req'); if (rq) rq.style.display = '';
 }
 
 function failCard(el, text) {
@@ -542,6 +547,20 @@ async function renderJob(el, job, wallMs) {
   const decodeMs = t.decode_ms || 0;
   const decTps = (decodeMs > 0 && res.completion_tokens) ? res.completion_tokens / (decodeMs / 1000) : 0;
   el.querySelector('.dur').innerHTML = `<span class="dur-badge">总耗时 ${(wallMs / 1000).toFixed(2)} s</span>`;
+  const rq = job.request || {};
+  const mb = rq.image_bytes ? (rq.image_bytes / 1024 / 1024).toFixed(2) + ' MB' : '–';
+  el.querySelector('.req').innerHTML = [
+    `task <b>${esc(rq.task || '–')}</b>`,
+    `lang <b>${esc(rq.lang || '–')}</b>`,
+    rq.text ? `text <b>${esc(rq.text)}</b>` : '',
+    `bbox <b>${rq.n_boxes ?? 0}</b>`,
+    (rq.target_region_indexes && rq.target_region_indexes.length)
+        ? `targets <b>[${rq.target_region_indexes.join(',')}]</b>` : '',
+    rq.render_png ? `render_png <b>是</b>` : '',
+    `图片 <b>${mb}</b>`,
+    `总耗时 <b>${(wallMs / 1000).toFixed(2)} s</b>`,
+    `服务端 <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
+  ].filter(Boolean).join(' · ');
   el.querySelector('.meta').innerHTML = [
     `服务端 e2e <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
     `排队 <b>${Math.round(waitMs)} ms</b>`,
