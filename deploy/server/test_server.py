@@ -320,6 +320,25 @@ def phase_d() -> None:
         tmp_png.write_bytes(png)
         im = Image.open(tmp_png)
         check(im.size == (2560, 1920), "缩放任务的 PNG 仍是原图尺寸", f"{im.size}")
+        # 回归：PNG 里画的框必须与 result_bbox_list（原图坐标）一致。
+        # 曾经在坐标映射之前渲染，导致缩放图的框直接画在原图上（整体偏左上）。
+        try:
+            import numpy as np
+            arr = np.array(im.convert("RGB"))
+            red = (arr[:, :, 0] > 150) & (arr[:, :, 1] < 100) & (arr[:, :, 2] < 100)
+            hit = 0
+            for b in boxes:
+                x0, y0 = round(b["xmin"]), round(b["ymin"])
+                x1, y1 = round(b["xmax"]), round(b["ymax"])
+                ymid = (y0 + y1) // 2
+                top = red[max(0, y0 - 4):y0 + 5, x0 + 3:max(x0 + 4, x1 - 3)]
+                left = red[ymid, max(0, x0 - 4):x0 + 5]
+                if top.any() or left.any():
+                    hit += 1
+            check(boxes and hit >= len(boxes) * 0.9, "PNG 红框位置与 result 坐标一致",
+                  f"{hit}/{len(boxes)} 框边命中")
+        except ImportError:
+            print("  SKIP  numpy 未安装，跳过 PNG 框位置校验")
         tmp_png.unlink(missing_ok=True)
     finally:
         svc.stop()

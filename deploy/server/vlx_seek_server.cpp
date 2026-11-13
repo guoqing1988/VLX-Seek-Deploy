@@ -738,6 +738,20 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
                        {"serialization_ms", t.serialization_ms},
                        {"e2e_ms", t.e2e_ms}};
         }
+    // 结果框坐标回到原图坐标系（模型看到的是缩小后的图）
+    if (job->resized && err.empty() && job->orig_w > 0 && job->proc_w > 0) {
+        const double kx = double(job->orig_w) / job->proc_w;
+        const double ky = double(job->orig_h) / job->proc_h;
+        if (res_json.contains("result_bbox_list")) {
+            for (auto& b : res_json["result_bbox_list"]) {
+                if (b.contains("xmin")) b["xmin"] = b["xmin"].get<double>() * kx;
+                if (b.contains("xmax")) b["xmax"] = b["xmax"].get<double>() * kx;
+                if (b.contains("ymin")) b["ymin"] = b["ymin"].get<double>() * ky;
+                if (b.contains("ymax")) b["ymax"] = b["ymax"].get<double>() * ky;
+            }
+        }
+    }
+
         if (job->render_png && err.empty()) {
             TempFile png_tmp;
             png_tmp.path = opts_.tmp_dir + "/" + job->id + ".png";
@@ -774,20 +788,6 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
         }
     }
     if (owns_rgb) vlx_seek_free_buffer(rgb);
-
-    // 结果框坐标回到原图坐标系（模型看到的是缩小后的图）
-    if (job->resized && err.empty() && job->orig_w > 0 && job->proc_w > 0) {
-        const double kx = double(job->orig_w) / job->proc_w;
-        const double ky = double(job->orig_h) / job->proc_h;
-        if (res_json.contains("result_bbox_list")) {
-            for (auto& b : res_json["result_bbox_list"]) {
-                if (b.contains("xmin")) b["xmin"] = b["xmin"].get<double>() * kx;
-                if (b.contains("xmax")) b["xmax"] = b["xmax"].get<double>() * kx;
-                if (b.contains("ymin")) b["ymin"] = b["ymin"].get<double>() * ky;
-                if (b.contains("ymax")) b["ymax"] = b["ymax"].get<double>() * ky;
-            }
-        }
-    }
     job->scaled_rgb.clear();
     job->scaled_rgb.shrink_to_fit();
 

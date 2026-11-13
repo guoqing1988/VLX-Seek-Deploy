@@ -99,7 +99,7 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
 ./deploy/server/serve.sh --preload       # 0.0.0.0:8110（本机 .env；脚本默认 8100），2 实例
-python3 deploy/server/test_server.py     # 65 项验收；若已用 systemd 托管，先 sudo systemctl stop vlx-seek
+python3 deploy/server/test_server.py     # 66 项验收；若已用 systemd 托管，先 sudo systemctl stop vlx-seek
 ```
 
 服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。

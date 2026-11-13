@@ -741,16 +741,16 @@ ls a_result.png
 ## 9. 验收测试
 
 ```bash
-python3 deploy/server/test_server.py    # 65 项断言，自动起停服务
+python3 deploy/server/test_server.py    # 66 项断言，自动起停服务
 ```
 
 覆盖：冷启动不加载 → 首请求冷启动标记/加载耗时/结果框 → 不同尺寸连续请求（bug #3 回归）→
 热请求延迟 → 空闲卸载（显示 + 显存归零）→ 卸载后自动重载 → 手动卸载 → /metrics →
 2 实例并发（不同 worker）→ 取消排队任务 → /v1/vlx/info 统计 → URL 图像输入/404/协议校验 →
-2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图 →
+2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图（含 PNG 框位置==result 坐标）→
 API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换 →
 OpenAI 兼容：/v1/models、chat.completion + usage + vlx 框、无图/temperature>0/stream 400、vqa 自由文本 →
 可视化：`render_png` 返回 base64、`GET /jobs/{id}/png` 下载（PNG 尺寸=原图）、未请求渲染时 400 →
 渐进式：detection 的框喂给 brief_region_caption 且 `load_ms=0`（模型常驻）。
 
-最近一次结果：`PASS 65 / FAIL 0`（含大图自动缩放、API key 认证、OpenAI 兼容接口；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
+最近一次结果：`PASS 66 / FAIL 0`（含大图自动缩放、API key 认证、OpenAI 兼容接口；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
