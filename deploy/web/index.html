@@ -76,6 +76,19 @@
   .wstate{display:inline-flex;gap:6px;align-items:center;font-size:12px}
   .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#555}
   .dot.on{background:var(--ok)} .dot.busy{background:var(--warn)} .dot.off{background:#555}
+  .vizwrap{position:relative;border-radius:8px;overflow:hidden}
+  .vizph{width:100%;aspect-ratio:4/3;border-radius:8px}
+  .skeleton{background:linear-gradient(90deg,#1b1f27 25%,#242a35 37%,#1b1f27 63%);
+            background-size:400% 100%;animation:shimmer 1.4s ease-in-out infinite}
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
+  .loading{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;padding:6px 0 10px}
+  .spinner{width:15px;height:15px;flex:0 0 auto;border:2px solid var(--line);
+           border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .progress{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin-bottom:10px}
+  .progress i{display:block;height:100%;width:35%;border-radius:2px;background:var(--accent);
+              animation:slide 1.2s ease-in-out infinite}
+  @keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(340%)}}
 </style>
 </head>
 <body>
@@ -380,15 +393,37 @@ function cardFor(name) {
   el.className = 'card';
   el.innerHTML = `<div class="head"><span class="name"></span><span class="spacer"></span>
       <span class="state queued">queued</span></div>
-    <div class="body"><div><img class="viz" alt="带框图" style="display:none">
-      <div class="meta"></div></div><div><pre class="answer">等待中…</pre>
-      <details><summary>框列表</summary><div class="boxes"></div></details></div></div>`;
+    <div class="body">
+      <div><div class="vizwrap"><img class="viz" alt="带框图" style="display:none">
+        <div class="vizph skeleton"></div></div><div class="meta"></div></div>
+      <div>
+        <div class="loading"><span class="spinner"></span><span class="ltext">排队中…</span></div>
+        <div class="progress"><i></i></div>
+        <pre class="answer" style="display:none"></pre>
+        <details style="display:none"><summary>框列表</summary><div class="boxes"></div></details>
+      </div>
+    </div>`;
   el.querySelector('.name').textContent = name;
   return el;
+}
+
+// 完成/失败时收起 loading
+function finishCard(el) {
+  const l = el.querySelector('.loading'); if (l) l.remove();
+  const p = el.querySelector('.progress'); if (p) p.remove();
+  el.querySelector('.answer').style.display = '';
+  el.querySelector('details').style.display = '';
+}
+
+function setLoadingText(el, text) {
+  const t = el.querySelector('.ltext');
+  if (t) t.textContent = text;
 }
 function setState(el, s) {
   const b = el.querySelector('.state');
   b.textContent = s; b.className = 'state ' + s;
+  if (s === 'queued') setLoadingText(el, '排队中…');
+  if (s === 'running') setLoadingText(el, '推理中…');
 }
 
 async function submitOne(name, image) {
@@ -401,19 +436,22 @@ async function submitOne(name, image) {
   const bboxRaw = $('#bbox').value.trim();
   if (bboxRaw) {
     try { body.bbox_list = JSON.parse(bboxRaw); }
-    catch { setState(el, 'failed'); el.querySelector('.answer').textContent = 'bbox_list 不是合法 JSON'; return; }
+    catch { setState(el, 'failed'); finishCard(el);
+            el.querySelector('.answer').textContent = 'bbox_list 不是合法 JSON'; return; }
   }
   const tRaw = $('#targets').value.trim();
   if (tRaw) {
     try { body.target_region_indexes = JSON.parse(tRaw); }
-    catch { setState(el, 'failed'); el.querySelector('.answer').textContent = 'target_region_indexes 不是合法 JSON'; return; }
+    catch { setState(el, 'failed'); finishCard(el);
+            el.querySelector('.answer').textContent = 'target_region_indexes 不是合法 JSON'; return; }
   }
 
   let job;
   try {
     job = await api('/v1/vlx/infer', { method: 'POST', body: JSON.stringify(body) });
   } catch (e) {
-    setState(el, 'failed'); el.querySelector('.answer').textContent = '提交失败：' + e.message; return;
+    setState(el, 'failed'); finishCard(el);
+    el.querySelector('.answer').textContent = '提交失败：' + e.message; return;
   }
   setState(el, job.state || 'queued');
   el.querySelector('.answer').textContent = '排队中：' + job.job_id;
@@ -423,12 +461,17 @@ async function submitOne(name, image) {
     await new Promise((r) => setTimeout(r, 300));
     let j;
     try { j = await api('/v1/vlx/jobs/' + job.job_id); }
-    catch (e) { setState(el, 'failed'); el.querySelector('.answer').textContent = '查询失败：' + e.message; return; }
+    catch (e) { setState(el, 'failed'); finishCard(el);
+                el.querySelector('.answer').textContent = '查询失败：' + e.message; return; }
     setState(el, j.state);
     if (j.state === 'done') { renderJob(el, j, Date.now() - t0); return; }
     if (j.state === 'failed') {
+      finishCard(el);
       el.querySelector('.answer').textContent = '失败：' + (j.error || 'unknown');
       return;
+    }
+    if (j.state === 'running') {
+      setLoadingText(el, '推理中…（' + ((Date.now() - t0) / 1000).toFixed(1) + ' s）');
     }
   }
 }
@@ -446,6 +489,8 @@ function prettyAnswer(a) {
 }
 
 async function renderJob(el, job, wallMs) {
+  finishCard(el);
+  const ph = el.querySelector('.vizph'); if (ph) ph.remove();
   const res = job.result || {};
   const boxes = res.result_bbox_list || [];
   const t = job.timings_ms || {};
@@ -503,7 +548,9 @@ $('#runBtn').onclick = async () => {
     return;
   }
 
+  const btn0 = $('#runBtn').textContent;
   $('#runBtn').disabled = true;
+  $('#runBtn').innerHTML = '<span class="spinner" style="display:inline-block;vertical-align:-2px;margin-right:8px;width:12px;height:12px"></span>运行中…';
   try {
     for (const f of state.files) {
       const dataUrl = await fileToDataURL(f);
@@ -512,6 +559,7 @@ $('#runBtn').onclick = async () => {
     for (const u of urls) await submitOne(u, u);
   } finally {
     $('#runBtn').disabled = false;
+    $('#runBtn').textContent = '运行';
     refreshHealth();
   }
 };
