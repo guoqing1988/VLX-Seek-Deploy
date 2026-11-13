@@ -38,6 +38,7 @@
 #include <nlohmann/json.hpp>
 
 #include "vlx/vlx_seek_capi.h"
+#include "stb_image.h"
 #include "stb_image_write.h"
 #include "vlx_pipeline_common.hpp"
 
@@ -207,6 +208,85 @@ void openai_error(httplib::Response& res, int status, const std::string& message
                     "application/json");
 }
 
+
+// ---------------- EXIF 方向 ----------------
+// 浏览器会按 EXIF Orientation 旋转显示 JPEG，但 stb_image 不处理 → 服务端会把照片
+// 当"横躺"的图去推理/渲染。这里在提交阶段解析 Orientation 并把像素转正，
+// 后续（缩放/推理/坐标/渲染）全部基于转正后的图。
+int jpeg_exif_orientation(const std::string& b) {
+    if (b.size() < 4 || uint8_t(b[0]) != 0xFF || uint8_t(b[1]) != 0xD8) return 1;
+    size_t i = 2;
+    while (i + 4 <= b.size()) {
+        if (uint8_t(b[i]) != 0xFF) { ++i; continue; }
+        const uint8_t marker = uint8_t(b[i + 1]);
+        if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }
+        if (marker == 0xDA || marker == 0xD9) break;  // SOS/EOI：后面没有 metadata 了
+        const size_t len = (size_t(uint8_t(b[i + 2])) << 8) | uint8_t(b[i + 3]);
+        if (len < 2 || i + 2 + len > b.size()) break;
+        if (marker == 0xE1 && len >= 8 && b.compare(i + 4, 6, "Exif\0\0", 6) == 0) {
+            const size_t tiff = i + 10;               // APP1 数据段起点
+            const size_t end = i + 2 + len;
+            if (tiff + 8 > end) return 1;
+            const bool little = b[tiff] == 'I' && b[tiff + 1] == 'I';
+            auto u16 = [&](size_t off) -> unsigned {
+                const uint8_t* p = reinterpret_cast<const uint8_t*>(b.data()) + off;
+                return little ? unsigned(p[0] | (p[1] << 8)) : unsigned((p[0] << 8) | p[1]);
+            };
+            auto u32 = [&](size_t off) -> unsigned {
+                const uint8_t* p = reinterpret_cast<const uint8_t*>(b.data()) + off;
+                return little ? unsigned(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24))
+                              : unsigned((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+            };
+            if (u16(tiff + 2) != 0x002A) return 1;
+            const size_t ifd0 = tiff + u32(tiff + 4);
+            if (ifd0 + 2 > end) return 1;
+            const unsigned n = u16(ifd0);
+            for (unsigned k = 0; k < n; ++k) {
+                const size_t e = ifd0 + 2 + size_t(k) * 12;
+                if (e + 12 > end) break;
+                if (u16(e) == 0x0112) {
+                    const unsigned v = u16(e + 8);
+                    return (v >= 1 && v <= 8) ? int(v) : 1;
+                }
+            }
+            return 1;
+        }
+        i += 2 + len;
+    }
+    return 1;
+}
+
+// 按 EXIF Orientation 把 RGB 像素转正（orientation 1 不变）
+void orient_rgb(const uint8_t* src, int w, int h, int o, std::vector<uint8_t>* dst,
+                int* ow, int* oh) {
+    const bool swap = (o >= 5 && o <= 8);
+    const int W = swap ? h : w;
+    const int H = swap ? w : h;
+    dst->resize(size_t(W) * H * 3);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            int sx = x, sy = y;
+            switch (o) {
+                case 2: sx = w - 1 - x; break;
+                case 3: sx = w - 1 - x; sy = h - 1 - y; break;
+                case 4: sy = h - 1 - y; break;
+                case 5: sx = y; sy = x; break;
+                case 6: sx = y; sy = h - 1 - x; break;
+                case 7: sx = w - 1 - y; sy = h - 1 - x; break;
+                case 8: sx = w - 1 - y; sy = x; break;
+                default: break;
+            }
+            const size_t d = (size_t(y) * W + x) * 3;
+            const size_t s = (size_t(sy) * w + sx) * 3;
+            dst->at(d) = src[s];
+            dst->at(d + 1) = src[s + 1];
+            dst->at(d + 2) = src[s + 2];
+        }
+    }
+    *ow = W;
+    *oh = H;
+}
+
 // ---------------- 配置 ----------------
 struct ServerOptions {
     std::string host = "0.0.0.0";
@@ -354,7 +434,8 @@ class VlxServer {
     void handle_metrics(const httplib::Request& req, httplib::Response& res);
 
     // ---- 内部 ----
-    json job_json(const std::shared_ptr<Job>& job, bool with_queue_pos) const;
+    json job_json(const std::shared_ptr<Job>& job, bool with_queue_pos,
+                  bool include_png = false) const;
     std::shared_ptr<Job> find_job(const std::string& id) const;
     void cleanup_jobs();
     void join_workers();
@@ -927,7 +1008,8 @@ std::shared_ptr<Job> VlxServer::find_job(const std::string& id) const {
     return it == jobs_.end() ? nullptr : it->second;
 }
 
-json VlxServer::job_json(const std::shared_ptr<Job>& job, bool with_queue_pos) const {
+json VlxServer::job_json(const std::shared_ptr<Job>& job, bool with_queue_pos,
+                         bool include_png) const {
     json j;
     j["job_id"] = job->id;
     j["state"] = state_name(job->state);
@@ -950,7 +1032,11 @@ json VlxServer::job_json(const std::shared_ptr<Job>& job, bool with_queue_pos) c
     j["error"] = job->error.empty() ? json(nullptr) : json(job->error);
     j["result"] = job->result.is_null() || job->result.empty() ? json(nullptr) : job->result;
     j["timings_ms"] = job->timings.empty() ? json(nullptr) : job->timings;
-    j["png_base64"] = job->png_b64.empty() ? json(nullptr) : json(job->png_b64);
+    // 响应里不返回图片本体：只给 has_png + 下载路径（页面/客户端按需取图）
+    j["has_png"] = !job->png_b64.empty();
+    j["png_url"] = job->png_b64.empty()
+                       ? json(nullptr)
+                       : json("/v1/vlx/jobs/" + job->id + "/png");
     if (with_queue_pos && job->state == JobState::Queued) {
         size_t pos = 0;
         for (const auto& q : queue_) {
@@ -1284,6 +1370,29 @@ std::shared_ptr<Job> VlxServer::enqueue_infer(const json& body, httplib::Respons
             return nullptr;
         }
     }
+    // EXIF 方向：把手机照片转正（浏览器按 EXIF 显示，stb 不转）
+    {
+        const int orient = jpeg_exif_orientation(bytes);
+        if (orient > 1) {
+            int w = 0, h = 0, n = 0;
+            unsigned char* px = stbi_load_from_memory(
+                reinterpret_cast<const stbi_uc*>(bytes.data()), int(bytes.size()),
+                &w, &h, &n, 3);
+            if (px) {
+                std::vector<uint8_t> rot;
+                int nw = 0, nh = 0;
+                orient_rgb(px, w, h, orient, &rot, &nw, &nh);
+                stbi_image_free(px);
+                if (stbi_write_png(job->image_path.c_str(), nw, nh, 3, rot.data(), nw * 3)) {
+                    logmsg(1, "job %s: EXIF orientation %d applied (%dx%d -> %dx%d)",
+                           job->id.c_str(), orient, w, h, nw, nh);
+                } else {
+                    logmsg(2, "job %s: EXIF rewrite failed, using raw pixels", job->id.c_str());
+                }
+            }
+        }
+    }
+
     // 分辨率上限：超过 --max-image-tokens 就等比缩小（不拒绝）。
     // 缩小后的坐标在 worker 里按 orig/proc 比例映射回原图坐标系。
     {
@@ -1461,7 +1570,7 @@ void VlxServer::handle_openai_chat(const httplib::Request& req, httplib::Respons
     json j;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        j = job_json(job, false);
+        j = job_json(job, false, true);
     }
     if (j["state"] == "failed") {
         openai_error(res, 500, j["error"].is_string() ? j["error"].get<std::string>() : "inference failed",
@@ -1497,7 +1606,7 @@ void VlxServer::handle_openai_chat(const httplib::Request& req, httplib::Respons
                  {"cold_start", j["cold_start"]},
                  {"load_ms", j["load_ms"]},
                  {"image", j["image"]},
-                 {"png_base64", j["png_base64"]}}}};
+                 {"png_url", j["png_url"]}}}};
     res.status = 200;
     res.set_content(resp.dump(), "application/json");
 }
@@ -1565,6 +1674,42 @@ void VlxServer::handle_job_png(const httplib::Request& req, httplib::Response& r
     if (!b64_decode(b64, &raw) || raw.empty()) {
         res.status = 500;
         res.set_content(json{{"error", "PNG decode failed"}}.dump(), "application/json");
+        return;
+    }
+
+    // ?format=jpeg|jpg&q=88 —— 照片类图像 PNG 往往比原始像素还大，
+    // 页面默认取 JPEG（体积约 1/10，肉眼无差）。
+    const std::string fmt = req.has_param("format") ? req.get_param_value("format") : "png";
+    if (fmt == "jpeg" || fmt == "jpg") {
+        int q = 88;
+        if (req.has_param("q")) {
+            try { q = std::clamp(std::stoi(req.get_param_value("q")), 1, 100); } catch (...) {}
+        }
+        int w = 0, h = 0, n = 0;
+        unsigned char* pixels = stbi_load_from_memory(
+            reinterpret_cast<const stbi_uc*>(raw.data()), int(raw.size()), &w, &h, &n, 3);
+        if (!pixels) {
+            res.status = 500;
+            res.set_content(json{{"error", "PNG decode failed"}}.dump(), "application/json");
+            return;
+        }
+        const std::string tmp = opts_.tmp_dir + "/" + job->id + ".jpg";
+        const bool ok = stbi_write_jpg(tmp.c_str(), w, h, 3, pixels, q) != 0;
+        stbi_image_free(pixels);
+        if (ok) {
+            std::ifstream in(tmp, std::ios::binary);
+            std::string jpg((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+            std::error_code ec;
+            fs::remove(tmp, ec);
+            if (!jpg.empty()) {
+                res.set_content(jpg, "image/jpeg");
+                res.set_header("Content-Disposition", "inline; filename=\"" + job->id + ".jpg\"");
+                return;
+            }
+        }
+        res.status = 500;
+        res.set_content(json{{"error", "JPEG encode failed"}}.dump(), "application/json");
         return;
     }
     res.set_content(raw, "image/png");

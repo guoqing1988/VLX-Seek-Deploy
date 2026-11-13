@@ -117,7 +117,8 @@ Content-Type: application/json
   "request": {"task": "detection", "text": "橘子; 苹果", "lang": "zh",
               "n_boxes": 0, "target_region_indexes": [], "render_png": false,
               "image_bytes": 125520},
-  "result": null, "timings_ms": null, "error": null, "png_base64": null
+  "result": null, "timings_ms": null, "error": null,
+  "has_png": false, "png_url": null
 }
 ```
 
@@ -145,7 +146,8 @@ GET /v1/vlx/jobs/job-1
   "timings_ms": {"preprocess_ms": 210.1, "inference_ms": 712.4,
                  "postprocess_ms": 0.07, "serialization_ms": 0.0, "e2e_ms": 925.1},
   "error": null,
-  "png_base64": null
+  "has_png": true,
+  "png_url": "/v1/vlx/jobs/job-1/png"
 }
 ```
 
@@ -245,7 +247,7 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 ```
 
 响应是标准 `chat.completion`（`id/object/created/model/choices/usage`），额外带 `vlx` 块：
-`job_id`、`task`、`result_bbox_list`、`timings_ms`、`cold_start`、`load_ms`、`image`、`png_base64`。
+`job_id`、`task`、`result_bbox_list`、`timings_ms`、`cold_start`、`load_ms`、`image`、`png_url`（响应绝不内联图片本体）。
 
 行为与限制：
 
@@ -482,8 +484,9 @@ curl -s -o result.png localhost:8110/v1/vlx/jobs/job-7/png    # image/png
 ```
 
 ```json
-// 2) 响应里直接拿 base64（异步接口的 vlx.png_base64 / OpenAI 接口的 vlx.png_base64）
+// 2) 响应只给路径：has_png / png_url（异步接口与 OpenAI 接口一致，不内联 base64）
 {"task":"detection","render_png":true, ...}
+// → "has_png": true, "png_url": "/v1/vlx/jobs/job-7/png"
 ```
 
 ```bash
@@ -493,6 +496,8 @@ ls a_result.png
 ```
 
 - `GET /v1/vlx/jobs/{id}/png`：任务未完成 409；没请求 `render_png` 时 400 并提示；PNG 在 job 保留期内（`--job-ttl-s`，默认 1 h）可重复下载
+- **`?format=jpeg&q=88`**：返回 JPEG（照片类图像体积约为 PNG 的 1/10，实测 363 KB → 46 KB）。
+  响应里只给 `has_png` + `png_url`，从不内联图片本体（避免轮询/同步响应被几 MB 拖慢）
 - PNG **始终按原图尺寸渲染**（`image.original_width × original_height`）：缩放只影响送进模型的分辨率，
   框坐标在服务内部已映射回原图，PNG 与 `result_bbox_list` 完全一致，调用者不需要换算
 - 渲染样式与官方 `inference.py` 一致：红色 3 px 矩形 + 标签（非 ASCII 标签会退化成 `<objN>`）

@@ -62,6 +62,7 @@
   .meta{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}
   .meta b{color:var(--fg);font-weight:600}
   pre.answer{white-space:pre-wrap;word-break:break-word;background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px;margin:0;max-height:220px;overflow:auto;font-size:13px}
+  pre.answer.err-text{color:var(--err);border-color:#5a1f1f;background:#1a0f0f}
   .mark{color:#7ee787}
   table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
   th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
@@ -110,6 +111,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.5</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -180,7 +182,7 @@
         <div class="stats">
           <div class="stat"><span class="k">最近解码 TPS（模型实际速度）</span><b id="tpsLast">–</b></div>
           <div class="stat"><span class="k">忙时 TPS（10s 内推理平均）</span><b id="tpsActive">–</b></div>
-          <div class="stat"><span class="k">10s 平均吞吐（含空闲）</span><b id="tpsNow">–</b></div>
+          <div class="stat"><span class="k">10s 完成请求</span><b id="reqs10">–</b></div>
           <div class="stat"><span class="k">队列深度</span><b id="qDepth">–</b></div>
         </div>
         <table>
@@ -269,7 +271,7 @@ async function refreshHealth() {
     $('#pTps').className = 'pill ' + (last > 0.05 ? 'on' : 'off');
     $('#tpsLast').innerHTML = fmtTps(last) + ' <small>tok/s</small>';
     $('#tpsActive').innerHTML = fmtTps(t10.active_tps) + ' <small>tok/s</small>';
-    $('#tpsNow').innerHTML = fmtTps(t10.tps) + ' <small>tok/s</small>';
+    $('#reqs10').innerHTML = (t10.requests || 0) + ' <small>个 · ' + (t10.tokens || 0) + ' tok</small>';
     $('#qDepth').textContent = h.queue_depth;
     const rows = (h.workers || []).map((w) => {
       const cls = w.state === 'loaded' ? 'on' : (w.state === 'running' ? 'busy' : 'off');
@@ -417,6 +419,13 @@ function finishCard(el) {
   el.querySelector('details').style.display = '';
 }
 
+function failCard(el, text) {
+  finishCard(el);
+  const a = el.querySelector('.answer');
+  a.classList.add('err-text');
+  a.textContent = text;
+}
+
 function setLoadingText(el, text) {
   const t = el.querySelector('.ltext');
   if (t) t.textContent = text;
@@ -438,45 +447,71 @@ async function submitOne(name, image) {
   const bboxRaw = $('#bbox').value.trim();
   if (bboxRaw) {
     try { body.bbox_list = JSON.parse(bboxRaw); }
-    catch { setState(el, 'failed'); finishCard(el);
-            el.querySelector('.answer').textContent = 'bbox_list 不是合法 JSON'; return; }
+    catch { setState(el, 'failed'); failCard(el, 'bbox_list 不是合法 JSON'); return; }
   }
   const tRaw = $('#targets').value.trim();
   if (tRaw) {
     try { body.target_region_indexes = JSON.parse(tRaw); }
-    catch { setState(el, 'failed'); finishCard(el);
-            el.querySelector('.answer').textContent = 'target_region_indexes 不是合法 JSON'; return; }
+    catch { setState(el, 'failed'); failCard(el, 'target_region_indexes 不是合法 JSON'); return; }
   }
 
   let job;
   try {
     job = await api('/v1/vlx/infer', { method: 'POST', body: JSON.stringify(body) });
   } catch (e) {
-    setState(el, 'failed'); finishCard(el);
-    el.querySelector('.answer').textContent = '提交失败：' + e.message; return;
+    setState(el, 'failed'); failCard(el, '提交失败：' + e.message); return;
   }
   setState(el, job.state || 'queued');
   el.querySelector('.answer').textContent = '排队中：' + job.job_id;
 
   const t0 = Date.now();
+  const MAX_WAIT_MS = 300000;   // 5 分钟
+  let netErr = 0;
   while (true) {
     await new Promise((r) => setTimeout(r, 300));
-    let j;
-    try { j = await api('/v1/vlx/jobs/' + job.job_id); }
-    catch (e) { setState(el, 'failed'); finishCard(el);
-                el.querySelector('.answer').textContent = '查询失败：' + e.message; return; }
-    setState(el, j.state);
-    if (j.state === 'done') { renderJob(el, j, Date.now() - t0); return; }
-    if (j.state === 'failed') {
-      finishCard(el);
-      el.querySelector('.answer').textContent = '失败：' + (j.error || 'unknown');
+    if (Date.now() - t0 > MAX_WAIT_MS) {
+      setState(el, 'failed');
+      failCard(el, `超时：请求超过 ${MAX_WAIT_MS / 60000} 分钟仍未完成（job ${job.job_id}）。` +
+                  '可以到服务端日志或 /v1/vlx/jobs 查看状态。');
       return;
     }
-    if (j.state === 'running') {
-      const waitS = j.started_at_ms ? (j.started_at_ms - j.created_at_ms) / 1000 : 0;
-      const runS = j.started_at_ms ? (Date.now() - t0) / 1000 - waitS : (Date.now() - t0) / 1000;
-      setLoadingText(el, '推理中…（' + runS.toFixed(1) + ' s）');
-      el.querySelector('.dur').textContent = waitS >= 0.1 ? `排队 ${waitS.toFixed(1)}s · 推理 ${runS.toFixed(1)}s` : '';
+    let j;
+    try {
+      j = await api('/v1/vlx/jobs/' + job.job_id);
+      netErr = 0;
+    } catch (e) {
+      netErr++;
+      if (netErr >= 5) {
+        setState(el, 'failed');
+        failCard(el, '查询状态失败（连续 5 次）：' + e.message);
+        return;
+      }
+      setLoadingText(el, `查询失败，重试中…（${netErr}/5）`);
+      continue;
+    }
+    // UI 更新与轮询解耦：任何渲染异常都不能打断轮询
+    try {
+      setState(el, j.state);
+      if (j.state === 'done') { renderJob(el, j, Date.now() - t0); return; }
+      if (j.state === 'failed') {
+        setState(el, 'failed');
+        failCard(el, '失败：' + (j.error || 'unknown') + `\n（job ${job.job_id}）`);
+        return;
+      }
+      if (j.state === 'cancelled') {
+        setState(el, 'failed');
+        failCard(el, '已取消：job ' + job.job_id);
+        return;
+      }
+      if (j.state === 'running') {
+        const waitS = j.started_at_ms ? (j.started_at_ms - j.created_at_ms) / 1000 : 0;
+        const runS = j.started_at_ms ? (Date.now() - t0) / 1000 - waitS : (Date.now() - t0) / 1000;
+        setLoadingText(el, '推理中…（' + runS.toFixed(1) + ' s）');
+        const durEl = el.querySelector('.dur');
+        if (durEl) durEl.textContent = waitS >= 0.1 ? `排队 ${waitS.toFixed(1)}s · 推理 ${runS.toFixed(1)}s` : '';
+      }
+    } catch (e) {
+      console.error('render', e);
     }
   }
 }
@@ -503,19 +538,17 @@ async function renderJob(el, job, wallMs) {
   el.querySelector('.answer').innerHTML = prettyAnswer(res.answer || '(空)');
 
   // 带框图（需要请求时 render_png=true）
-  if (job.png_base64) {
-    const im = el.querySelector('.viz');
-    im.src = 'data:image/png;base64,' + job.png_base64;
-    im.style.display = '';
-  } else if ($('#renderPng').checked) {
+  if (job.has_png && job.png_url) {
     try {
-      const r = await fetch('/v1/vlx/jobs/' + job.job_id + '/png',
+      const r = await fetch(job.png_url + (job.png_url.includes('?') ? '&' : '?') + 'format=jpeg&q=88',
                             { headers: { Authorization: 'Bearer ' + state.key } });
       if (r.ok) {
         const blob = await r.blob();
         const im = el.querySelector('.viz');
         im.src = URL.createObjectURL(blob);
         im.style.display = '';
+      } else if (r.status === 400) {
+        // 未请求 render_png，无图可显示
       }
     } catch {}
   }
@@ -578,6 +611,12 @@ $('#runBtn').onclick = async () => {
     refreshHealth();
   }
 };
+
+// 全局异常：显示一条提示，避免静默卡住
+window.addEventListener('error', (ev) => {
+  const b = document.getElementById('reloadMsg');
+  if (b) b.textContent = '页面脚本异常：' + (ev.message || 'unknown') + '（请硬刷新 Ctrl+Shift+R）';
+});
 
 // ---------- 启动 ----------
 if (state.key) {

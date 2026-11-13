@@ -462,13 +462,23 @@ def phase_g() -> None:
             "task": "detection", "text": "orange; apple", "lang": "zh",
             "image": img, "render_png": True})
         job = svc.wait_job(json.loads(body)["job_id"], timeout=240)
-        check(job["state"] == "done" and bool(job.get("png_base64")), "render_png=true 返回 PNG base64")
+        check(job["state"] == "done" and bool(job.get("has_png")) and bool(job.get("png_url")),
+              "render_png=true 返回 has_png + png_url")
+        check("png_base64" not in job, "任务响应不含 base64（避免大 JSON）")
         req = urllib.request.Request(f"{svc.base}/v1/vlx/jobs/{job['job_id']}/png")
         with urllib.request.urlopen(req, timeout=30) as r:
             png = r.read()
             ctype = r.headers.get("Content-Type", "")
         check(png[:8] == b"\x89PNG\r\n\x1a\n" and "image/png" in ctype,
               "GET /v1/vlx/jobs/{id}/png 下载 PNG", f"{len(png)} bytes")
+        req_jpg = urllib.request.Request(
+            f"{svc.base}{job['png_url']}?format=jpeg&q=88",
+            headers={"Authorization": "Bearer " + "smoke-key-1"} if False else {})
+        with urllib.request.urlopen(req_jpg, timeout=60) as rj:
+            jpg = rj.read()
+            jtype = rj.headers.get("Content-Type", "")
+        check(jpg[:3] == b"\xff\xd8\xff" and "image/jpeg" in jtype,
+              "?format=jpeg 返回 JPEG", f"{len(jpg)} bytes")
 
         code, body = http("POST", svc.base + "/v1/vlx/infer",
                           {"task": "vqa", "text": "what is this?", "image": img})

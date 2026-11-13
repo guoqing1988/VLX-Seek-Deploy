@@ -156,10 +156,10 @@ POST /v1/vlx/infer
   `jobs = [submit(image=p) for p in paths]` → 各自轮询。
 - **渐进式（先粗后细）**：`detection` 拿框 → 用 `bbox_list` + `target_region_indexes`
   对该框做 `region_ocr` / `brief_region_caption`。实测第二步 1.24 s、`load_ms=0`（模型常驻）。
-- **下载带框图**：提交时 `render_png: true`，然后
-  `curl -s -o result.png localhost:8110/v1/vlx/jobs/<job_id>/png`；
-  或 CLI 默认写 `<image>_result.png`。PNG **始终按原图尺寸渲染**，框位置与 `result_bbox_list` 一致，
-  内部缩放对调用者完全透明（无需换算）。
+- **下载带框图**：提交时 `render_png: true`，响应只回 `has_png` + `png_url`（**不内联 base64**），
+  再按需下载：`curl -s -o result.png localhost:8110/v1/vlx/jobs/<job_id>/png`
+  （加 `?format=jpeg&q=88` 体积约为 PNG 的 1/10）；或 CLI 默认写 `<image>_result.png`。
+  PNG/JPEG **始终按原图尺寸渲染**，框位置与 `result_bbox_list` 一致，缩放对调用者透明。
 
 详见 [`deploy/SERVER.md` §3.6](deploy/SERVER.md)。
 
