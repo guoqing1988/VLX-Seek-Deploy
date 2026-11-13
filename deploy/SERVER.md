@@ -264,7 +264,7 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 | `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e），含 `endpoints` 列表 |
 | `POST /v1/vlx/unload?wait=1&timeout_ms=30000` | 强制卸载；`wait=1` 等到 worker 真正释放 |
 | `POST /v1/vlx/reload?wait=1` | **软重启**：卸载并重新加载模型（约 3–5 s/实例，含预热），返回每个 worker 的 `load_ms` |
-| `GET /healthz` 的 `tps` | 实时吞吐：`10s/60s` 窗口的 `tps`（含空闲）、`active_tps`（仅忙时）、`last_decode_tps` |
+| `GET /healthz` 的 `tps` | 三个口径：`last_decode_tps`（最近一次请求的 tok/s，**推荐**）、`active_tps`（10s 内忙时平均，即 tokens / 推理耗时）、`tps`（10s/60s 窗口内完成 tokens / 窗口时长，**含空闲**，空闲后会降） |
 | `GET /v1/vlx/jobs?limit=50&state=done` | 任务列表（新的在前） |
 | `DELETE /v1/vlx/jobs/{id}` | 取消排队中的任务（运行中返回 409） |
 | `GET /v1/vlx/jobs/{id}/png` | 下载带框的可视化 PNG（需提交时 `render_png=true`；未完成 409） |

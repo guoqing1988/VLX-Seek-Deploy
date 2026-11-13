@@ -163,9 +163,9 @@
       <div class="panel" id="infoPanel" style="margin-bottom:14px">
         <h2>服务状态（每 2 秒刷新）</h2>
         <div class="stats">
-          <div class="stat"><span class="k">实时 TPS（10s 窗口）</span><b id="tpsNow">–</b></div>
-          <div class="stat"><span class="k">TPS（60s 窗口）</span><b id="tps60">–</b></div>
-          <div class="stat"><span class="k">推理时 TPS（忙时）</span><b id="tpsActive">–</b></div>
+          <div class="stat"><span class="k">最近解码 TPS（模型实际速度）</span><b id="tpsLast">–</b></div>
+          <div class="stat"><span class="k">忙时 TPS（10s 内推理平均）</span><b id="tpsActive">–</b></div>
+          <div class="stat"><span class="k">10s 平均吞吐（含空闲）</span><b id="tpsNow">–</b></div>
           <div class="stat"><span class="k">队列深度</span><b id="qDepth">–</b></div>
         </div>
         <table>
@@ -237,7 +237,7 @@ function showApp() {
 $('#logoutBtn').onclick = () => { sessionStorage.removeItem('vlx_api_key'); location.reload(); };
 
 // ---------- 状态 ----------
-function fmtTps(v) { return (v == null ? '–' : (v >= 10 ? v.toFixed(0) : v.toFixed(1))); }
+function fmtTps(v) { return (v == null ? '–' : (v >= 100 ? v.toFixed(0) : v.toFixed(1))); }
 
 async function refreshHealth() {
   try {
@@ -249,11 +249,12 @@ async function refreshHealth() {
     $('#pQueue').textContent = '队列 ' + h.queue_depth;
     const t = h.tps || {};
     const t10 = t['10s'] || {}, t60 = t['60s'] || {};
-    $('#pTps').textContent = 'TPS ' + fmtTps(t10.tps);
-    $('#pTps').className = 'pill ' + (t10.tps > 0.05 ? 'on' : 'off');
-    $('#tpsNow').innerHTML = fmtTps(t10.tps) + ' <small>tok/s</small>';
-    $('#tps60').innerHTML = fmtTps(t60.tps) + ' <small>tok/s</small>';
+    const last = t.last_decode_tps || 0;
+    $('#pTps').textContent = 'TPS ' + fmtTps(last);
+    $('#pTps').className = 'pill ' + (last > 0.05 ? 'on' : 'off');
+    $('#tpsLast').innerHTML = fmtTps(last) + ' <small>tok/s</small>';
     $('#tpsActive').innerHTML = fmtTps(t10.active_tps) + ' <small>tok/s</small>';
+    $('#tpsNow').innerHTML = fmtTps(t10.tps) + ' <small>tok/s</small>';
     $('#qDepth').textContent = h.queue_depth;
     const rows = (h.workers || []).map((w) => {
       const cls = w.state === 'loaded' ? 'on' : (w.state === 'running' ? 'busy' : 'off');
