@@ -126,7 +126,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.8</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.9</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -479,7 +479,7 @@ function cardFor(name) {
   const el = document.createElement('div');
   el.className = 'card';
   el.innerHTML = `<div class="head"><span class="name"></span><span class="spacer"></span>
-      <span class="state queued">queued</span></div>
+      <span class="dur"></span><span class="state queued">queued</span></div>
     <div class="body">
       <div><div class="vizwrap"><img class="viz" alt="带框图" style="display:none">
         <div class="vizph skeleton"></div></div><div class="meta"></div></div>
