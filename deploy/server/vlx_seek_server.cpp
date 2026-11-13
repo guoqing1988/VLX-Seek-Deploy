@@ -226,7 +226,8 @@ struct ServerOptions {
     double job_ttl_s = 3600.0;
     int max_body_mb = 32;
     int max_image_mb = 16;        // URL 下载的图像上限
-    int max_image_tokens = 1200;  // 超过即等比缩小（1200 ≈ 1280x960，1.2 MP）
+    int max_image_side = 1920;    // 最长边上限：超过才等比缩放到该边长（0=不限制）
+    int max_image_tokens = 3800;  // 兜底：缩放后 token 仍超此值再缩（0=不限制）
     int image_url_timeout_s = 10; // URL 下载超时
     int openai_timeout_s = 300;   // /v1/chat/completions 同步等待上限
     std::string image_proxy;      // 可选 HTTP(S) 代理 host:port（默认读环境变量）
@@ -1202,19 +1203,33 @@ std::shared_ptr<Job> VlxServer::enqueue_infer(const json& body, httplib::Respons
             job->proc_w = pw;
             job->proc_h = ph;
             const int est = estimate_image_tokens(ph, pw);
-            // max_image_tokens <= 0：关闭缩放（受 runtime n_batch=4096 限制，
-            // 约可覆盖 2400×1600；更大的图会因 prefill batch 放不下而失败）
-            if (opts_.max_image_tokens > 0 && est > opts_.max_image_tokens) {
+            int nw = pw, nh = ph;
+            bool need = false;
+            // (1) 最长边上限：只缩超过 --max-image-side 的图，小图完全不处理
+            if (opts_.max_image_side > 0 && std::max(pw, ph) > opts_.max_image_side) {
+                const double k = double(opts_.max_image_side) / double(std::max(pw, ph));
+                nw = int(std::lround(double(pw) * k));
+                nh = int(std::lround(double(ph) * k));
+                need = true;
+            }
+            // (2) token 兜底：保证一次 prefill 放得下（runtime n_batch=4096）
+            if (opts_.max_image_tokens > 0 &&
+                estimate_image_tokens(nh, nw) > opts_.max_image_tokens) {
                 const double target_px = double(opts_.max_image_tokens) * 1024.0;
-                const double k = std::sqrt(target_px / (double(pw) * double(ph)));
-                int nw = std::max(32, int(std::floor(double(pw) * k)));
-                int nh = std::max(32, int(std::floor(double(ph) * k)));
-                // 至少保留 32 的网格步长，直到估算 token 数满足预算
+                const double k2 = std::sqrt(target_px / (double(nw) * double(nh)));
+                nw = int(std::lround(double(nw) * k2));
+                nh = int(std::lround(double(nh) * k2));
                 while (estimate_image_tokens(nh, nw) > opts_.max_image_tokens &&
                        nw > 32 && nh > 32) {
-                    nw = std::max(32, nw - 32);
-                    nh = std::max(32, nh - 32);
+                    nw -= std::max(1, nw / 32);
+                    nh -= std::max(1, nh / 32);
                 }
+                need = true;
+            }
+            if (need) {
+                // 对齐到 32 的倍数（= 主视觉塔 patch 网格），这样坐标映射是精确的
+                nw = std::max(32, (nw / 32) * 32);
+                nh = std::max(32, (nh / 32) * 32);
                 resize_rgb_bilinear(probe_rgb, pw, ph, nw, nh, &job->scaled_rgb);
                 job->proc_w = nw;
                 job->proc_h = nh;
@@ -1573,6 +1588,7 @@ std::string VlxServer::models_info_json() const {
                 {"temperature", 0.0},
                 {"instances", opts_.instances},
                 {"idle_unload_s", opts_.idle_unload_s},
+                {"max_image_side", opts_.max_image_side},
                 {"max_image_tokens", opts_.max_image_tokens},
                 {"max_image_mb", opts_.max_image_mb},
                 {"image_url_timeout_s", opts_.image_url_timeout_s},
@@ -1718,7 +1734,8 @@ void usage() {
                  "  --job-ttl-s F            已完成任务的保留秒数 [3600]\n"
                  "  --max-body-mb N          请求体上限 MB [32]\n"
                  "  --max-image-mb N         URL 下载图像上限 MB [16]\n"
-                 "  --max-image-tokens N     图像 token 预算，超出等比缩小；0=不缩放（受 n_batch 4096 限制）[1200]\n"
+                 "  --max-image-side N       最长边上限，超过才等比缩放（0=不限制）[1920]\n"
+                 "  --max-image-tokens N     token 兜底上限，缩放后仍超此值再缩（0=不限制）[3800]\n"
                  "  --image-url-timeout-s N  URL 下载超时秒 [10]\n"
                  "  --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）\n"
                  "  --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）\n"
@@ -1758,6 +1775,7 @@ bool parse_args(int argc, char** argv, ServerOptions* o) {
         else if (a == "--max-body-mb") o->max_body_mb = std::atoi(next("--max-body-mb").c_str());
         else if (a == "--max-image-mb") o->max_image_mb = std::atoi(next("--max-image-mb").c_str());
         else if (a == "--max-image-tokens") o->max_image_tokens = std::atoi(next("--max-image-tokens").c_str());
+        else if (a == "--max-image-side") o->max_image_side = std::atoi(next("--max-image-side").c_str());
         else if (a == "--image-url-timeout-s") o->image_url_timeout_s = std::atoi(next("--image-url-timeout-s").c_str());
         else if (a == "--image-proxy") o->image_proxy = next("--image-proxy");
         else if (a == "--api-key") o->api_key = next("--api-key");

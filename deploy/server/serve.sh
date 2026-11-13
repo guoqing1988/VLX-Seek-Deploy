@@ -6,7 +6,8 @@
 #   IDLE_UNLOAD_S=60 ./deploy/server/serve.sh --preload --log-level 0
 #
 # 环境变量：HOST / PORT / GPU / INSTANCES / IDLE_UNLOAD_S / PRECISION / DEVICE /
-#           IMAGE_PROXY / API_KEY / EXTRA_ARGS（systemd 读 deploy/.env）
+#           MAX_IMAGE_SIDE / MAX_IMAGE_TOKENS / IMAGE_PROXY / API_KEY / EXTRA_ARGS
+#           （systemd 读 deploy/.env）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +25,10 @@ mkdir -p "$HERE/tmp"
 # 可选：图像 URL 代理 / 追加参数（systemd 的 deploy/.env 会注入）
 PROXY_ARGS=()
 [ -n "${IMAGE_PROXY:-}" ] && PROXY_ARGS=(--image-proxy "$IMAGE_PROXY")
+# 图像缩放：最长边上限 + token 兜底（deploy/.env 可配，0 = 不限制）
+IMAGE_ARGS=()
+[ -n "${MAX_IMAGE_SIDE:-}" ] && IMAGE_ARGS+=(--max-image-side "$MAX_IMAGE_SIDE")
+[ -n "${MAX_IMAGE_TOKENS:-}" ] && IMAGE_ARGS+=(--max-image-tokens "$MAX_IMAGE_TOKENS")
 if [ -n "${EXTRA_ARGS:-}" ]; then
     read -r -a _extra <<< "$EXTRA_ARGS"
     set -- "${_extra[@]}" "$@"
@@ -39,4 +44,5 @@ exec "$BIN" \
     --precision "${PRECISION:-q8_0}" \
     --device "${DEVICE:-cuda}" \
     "${PROXY_ARGS[@]}" \
+    "${IMAGE_ARGS[@]}" \
     "$@"

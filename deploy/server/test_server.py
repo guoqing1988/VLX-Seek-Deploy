@@ -306,7 +306,8 @@ def phase_d() -> None:
         check(img.get("resized") is True, "超限图像被自动缩放",
               f"{img.get('original_width')}x{img.get('original_height')} -> "
               f"{img.get('width')}x{img.get('height')}")
-        check(int(img.get("width", 9999)) <= 1280, "处理尺寸不超过默认上限",
+        check(max(int(img.get("width", 9999)), int(img.get("height", 9999))) <= 1920,
+              "处理尺寸不超过最长边上限（1920）",
               f"{img.get('width')}x{img.get('height')}")
         if boxes:
             max_x = max(b["xmax"] for b in boxes)
