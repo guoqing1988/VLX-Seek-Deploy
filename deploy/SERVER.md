@@ -60,7 +60,7 @@ HOST=0.0.0.0 PORT=8200 INSTANCES=4 ./deploy/server/serve.sh --log-level 0
 #   --tmp-dir D              临时文件目录 [<exe_dir>/tmp]
 #   --threads N              CPU 线程，0=自动 [0]
 #   --max-new-tokens N       生成长度上限（服务级，请求不能覆盖）[2048]
-#   --max-image-tokens N     图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]
+#   --max-image-tokens N     图像 token 预算，超出等比缩小；0=不缩放（受 n_batch 4096 限制）[1200]
 #   --max-image-mb N         URL 下载图像上限 [16]
 #   --image-url-timeout-s N  URL 下载超时秒 [10]
 #   --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）
@@ -626,6 +626,32 @@ ls a_result.png
 
 坐标一致性：把 640×480 的图放大 4 倍成 2560×1920 再送服务（自动缩回 1280×960），
 框坐标乘回原图后与 4× 内插结果相差 **1–7 px**（缩放重采样误差）。
+
+### 缩放对坐标没有影响（实测）
+
+坐标映射在服务内部完成（`kx = original_width / processed_width`），调用者拿到的
+`result_bbox_list` 与 PNG 都是原图坐标。同一张 1181×1575 的图：
+
+| 档位 | 处理尺寸 | 结果 |
+|---|---|---|
+| `--max-image-tokens 1200`（默认，缩放到 959×1280） | 959×1280 | 10 个框，映射回原图后与"不缩放"逐框 **IoU 0.94–0.99**（差 1–2 px） |
+| `--max-image-tokens 0`（不缩放，2030 tokens） | 1181×1575 | 12 个框（多检出 2 个窗户里的小目标） |
+
+如果**不做**映射，缩放档的框会小一圈并整体左移上移（例如本该 `(45,560)-(65,613)` 会变成
+`(37,455)-(53,498)`，偏差约 100 px）——实测输出没有这种现象。
+
+缩放真正影响的是**候选框和召回**（WeDetect 在缩小图上生成 100 个候选框），不是坐标：
+同一张图默认档 10 框、不缩放档 12 框。
+
+### 关闭缩放（需要原图精度时）
+
+```bash
+./deploy/server/serve.sh --max-image-tokens 0      # 完全不缩放
+```
+
+- 受 runtime `n_batch=4096` 限制，约可覆盖 **≤ 2400×1600**（≈3800 图像 token）；
+  更大的图（如 4K）会因 prefill batch 放不下而失败，这时需要保留缩放或调大 `n_batch`
+- 也可以折中：`--max-image-tokens 2000`（≈1600×1200），减少缩放损失、显存 16.6 GiB/实例
 
 ### 上限怎么选
 

@@ -1202,7 +1202,9 @@ std::shared_ptr<Job> VlxServer::enqueue_infer(const json& body, httplib::Respons
             job->proc_w = pw;
             job->proc_h = ph;
             const int est = estimate_image_tokens(ph, pw);
-            if (est > opts_.max_image_tokens) {
+            // max_image_tokens <= 0：关闭缩放（受 runtime n_batch=4096 限制，
+            // 约可覆盖 2400×1600；更大的图会因 prefill batch 放不下而失败）
+            if (opts_.max_image_tokens > 0 && est > opts_.max_image_tokens) {
                 const double target_px = double(opts_.max_image_tokens) * 1024.0;
                 const double k = std::sqrt(target_px / (double(pw) * double(ph)));
                 int nw = std::max(32, int(std::floor(double(pw) * k)));
@@ -1716,7 +1718,7 @@ void usage() {
                  "  --job-ttl-s F            已完成任务的保留秒数 [3600]\n"
                  "  --max-body-mb N          请求体上限 MB [32]\n"
                  "  --max-image-mb N         URL 下载图像上限 MB [16]\n"
-                 "  --max-image-tokens N     图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]\n"
+                 "  --max-image-tokens N     图像 token 预算，超出等比缩小；0=不缩放（受 n_batch 4096 限制）[1200]\n"
                  "  --image-url-timeout-s N  URL 下载超时秒 [10]\n"
                  "  --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）\n"
                  "  --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）\n"
