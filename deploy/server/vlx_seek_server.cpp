@@ -335,6 +335,7 @@ class VlxServer {
     void handle_openai_chat(const httplib::Request& req, httplib::Response& res);
     void handle_openai_models(const httplib::Request& req, httplib::Response& res);
     void handle_job_get(const httplib::Request& req, httplib::Response& res);
+    void handle_job_png(const httplib::Request& req, httplib::Response& res);
     void handle_job_list(const httplib::Request& req, httplib::Response& res);
     void handle_job_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_health(const httplib::Request& req, httplib::Response& res);
@@ -921,6 +922,8 @@ void VlxServer::install_routes() {
     http_.Get("/v1/vlx/jobs", [this](const auto& r, auto& s) { handle_job_list(r, s); });
     http_.Get(R"(/v1/vlx/jobs/([A-Za-z0-9_\-]+))",
               [this](const auto& r, auto& s) { handle_job_get(r, s); });
+    http_.Get(R"(/v1/vlx/jobs/([A-Za-z0-9_\-]+)/png)",
+              [this](const auto& r, auto& s) { handle_job_png(r, s); });
     http_.Delete(R"(/v1/vlx/jobs/([A-Za-z0-9_\-]+))",
                  [this](const auto& r, auto& s) { handle_job_cancel(r, s); });
 
@@ -1392,6 +1395,43 @@ void VlxServer::handle_job_get(const httplib::Request& req, httplib::Response& r
     res.set_content(j.dump(), "application/json");
 }
 
+// GET /v1/vlx/jobs/<id>/png —— 直接下载带框的可视化 PNG（需提交时 render_png=true）
+void VlxServer::handle_job_png(const httplib::Request& req, httplib::Response& res) {
+    auto job = find_job(req.matches[1].str());
+    if (!job) {
+        res.status = 404;
+        res.set_content(json{{"error", "job not found"}}.dump(), "application/json");
+        return;
+    }
+    std::string b64;
+    JobState state;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        state = job->state;
+        b64 = job->png_b64;
+    }
+    if (state != JobState::Done) {
+        res.status = 409;
+        res.set_content(json{{"error", "job is not done"}, {"state", state_name(state)}}.dump(),
+                        "application/json");
+        return;
+    }
+    if (b64.empty()) {
+        res.status = 400;
+        res.set_content(json{{"error", "this job has no PNG: submit with render_png=true"}}.dump(),
+                        "application/json");
+        return;
+    }
+    std::string raw;
+    if (!b64_decode(b64, &raw) || raw.empty()) {
+        res.status = 500;
+        res.set_content(json{{"error", "PNG decode failed"}}.dump(), "application/json");
+        return;
+    }
+    res.set_content(raw, "image/png");
+    res.set_header("Content-Disposition", "inline; filename=\"" + job->id + ".png\"");
+}
+
 void VlxServer::handle_job_list(const httplib::Request& req, httplib::Response& res) {
     size_t limit = 50;
     if (req.has_param("limit")) {
@@ -1489,7 +1529,7 @@ std::string VlxServer::models_info_json() const {
     return json{{"device", opts_.device},
                 {"gpu", opts_.gpu.empty() ? json(nullptr) : json(opts_.gpu)},
                 {"auth_enabled", !opts_.api_key.empty()},
-                {"endpoints", json::array({"/v1/vlx/infer (async)", "/v1/vlx/jobs/{id}", "/v1/chat/completions (OpenAI, sync)", "/v1/models", "/healthz", "/metrics"})},
+                {"endpoints", json::array({"/v1/vlx/infer (async)", "/v1/vlx/jobs/{id}", "/v1/vlx/jobs/{id}/png", "/v1/chat/completions (OpenAI, sync)", "/v1/models", "/healthz", "/metrics"})},
                 {"auth_header", opts_.api_key.empty() ? json(nullptr) : json("Authorization: Bearer <key>")},
                 {"cuda_visible_devices",
                  std::getenv("CUDA_VISIBLE_DEVICES") ? json(std::getenv("CUDA_VISIBLE_DEVICES"))

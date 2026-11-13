@@ -86,7 +86,7 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
 ./deploy/server/serve.sh --preload       # 默认 0.0.0.0:8110，2 实例，空闲 300s 卸载
-sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 59 项验收（先让出显存）
+sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 64 项验收（先让出显存）
 ```
 
 服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。
@@ -104,7 +104,8 @@ curl -s localhost:8110/v1/vlx/jobs/job-1
 #    "timings_ms":{...},"cold_start":false,"image":{"resized":false,...}}
 ```
 
-运维接口：`GET /healthz`、`GET /v1/vlx/info`、`POST /v1/vlx/unload?wait=1`、`GET /metrics`。
+运维接口：`GET /healthz`、`GET /v1/vlx/info`、`POST /v1/vlx/unload?wait=1`、`GET /metrics`、
+`GET /v1/vlx/jobs/{id}/png`（下载带框图）。
 
 ### 任务（task）
 
@@ -134,6 +135,19 @@ POST /v1/vlx/infer
 - 不传 `bbox_list` 时由 WeDetect 自动生成 100 个候选框；区域任务的索引默认指向这些自动候选框
 
 每个任务的真实输入输出、返回字段和常见坑见 [`deploy/SERVER.md` §3.5](deploy/SERVER.md)。
+
+### 多图 / 渐进式 / 下载框图
+
+- **多图**：VLX-Seek 是单图模型（区域 token 只对应本图候选框，不支持跨图推理）。
+  多图 = 多次请求，异步接口天然并行（默认 2 实例）：
+  `jobs = [submit(image=p) for p in paths]` → 各自轮询。
+- **渐进式（先粗后细）**：`detection` 拿框 → 用 `bbox_list` + `target_region_indexes`
+  对该框做 `region_ocr` / `brief_region_caption`。实测第二步 1.24 s、`load_ms=0`（模型常驻）。
+- **下载带框图**：提交时 `render_png: true`，然后
+  `curl -s -o result.png localhost:8110/v1/vlx/jobs/<job_id>/png`；
+  或 CLI 默认写 `<image>_result.png`。PNG 是处理后的尺寸，框坐标是原图坐标（按 `image.scale` 换算）。
+
+详见 [`deploy/SERVER.md` §3.6](deploy/SERVER.md)。
 
 ### OpenAI 兼容接口
 

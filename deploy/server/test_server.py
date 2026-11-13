@@ -414,6 +414,49 @@ def gpu_free_mib() -> int:
         return 1 << 30
 
 
+def phase_g() -> None:
+    """带框图下载 + 渐进式两步"""
+    print("\n=== Phase G：可视化下载 / 渐进式 ===")
+    svc = Service(port=8117, instances=1, idle_s=0, tag="g")
+    img = base64.b64encode(IMAGE.read_bytes()).decode()
+    try:
+        check(svc.wait_ready(), "服务启动")
+        code, body = http("POST", svc.base + "/v1/vlx/infer", {
+            "task": "detection", "text": "orange; apple", "lang": "zh",
+            "image": img, "render_png": True})
+        job = svc.wait_job(json.loads(body)["job_id"], timeout=240)
+        check(job["state"] == "done" and bool(job.get("png_base64")), "render_png=true 返回 PNG base64")
+        req = urllib.request.Request(f"{svc.base}/v1/vlx/jobs/{job['job_id']}/png")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            png = r.read()
+            ctype = r.headers.get("Content-Type", "")
+        check(png[:8] == b"\x89PNG\r\n\x1a\n" and "image/png" in ctype,
+              "GET /v1/vlx/jobs/{id}/png 下载 PNG", f"{len(png)} bytes")
+
+        code, body = http("POST", svc.base + "/v1/vlx/infer",
+                          {"task": "vqa", "text": "what is this?", "image": img})
+        j2 = svc.wait_job(json.loads(body)["job_id"], timeout=240)
+        code, _ = http("GET", f"{svc.base}/v1/vlx/jobs/{j2['job_id']}/png")
+        check(code == 400, "未请求 render_png 时下载返回 400")
+
+        # 渐进式：detection 的框 -> region_ocr
+        code, body = http("POST", svc.base + "/v1/vlx/infer",
+                          {"task": "detection", "text": "orange; apple", "lang": "en",
+                           "image": img})
+        d = svc.wait_job(json.loads(body)["job_id"], timeout=240)
+        boxes = [[b["xmin"], b["ymin"], b["xmax"], b["ymax"]]
+                 for b in d["result"]["result_bbox_list"]]
+        code, body = http("POST", svc.base + "/v1/vlx/infer", {
+            "task": "brief_region_caption", "text": "describe", "lang": "en",
+            "image": img, "bbox_list": boxes, "target_region_indexes": [0]})
+        o = svc.wait_job(json.loads(body)["job_id"], timeout=240)
+        check(o["state"] == "done" and o["cold_start"] is False and o["load_ms"] == 0,
+              "渐进式第二步复用常驻模型（无重载）",
+              f"{len(boxes)} 框 -> 框0 描述")
+    finally:
+        svc.stop()
+
+
 def main() -> int:
     if not BIN.exists():
         print(f"缺少服务二进制：{BIN}\n先运行 deploy/server/build-server.sh")
@@ -436,6 +479,7 @@ def main() -> int:
     phase_d()
     phase_e()
     phase_f()
+    phase_g()
     print(f"\n=== 结果：PASS {PASS} / FAIL {FAIL} ===")
     return 0 if FAIL == 0 else 1
 

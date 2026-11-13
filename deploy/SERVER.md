@@ -422,6 +422,82 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 5. **输出必须解析**：`<objN>` 是模型协议的一部分；`result_bbox_list` 已帮你解析并映射回原图。
 6. **`reasoning_detection` 慢**：输出可达 450 tokens，端到端 6.7 s，不适合高并发低延迟场景。
 
+### 3.6 常见用法模式
+
+#### 多张图片
+
+VLX-Seek 是**单图模型**：一次请求只处理一张图，区域 token 只对应当前图的 100 个候选框，
+**不支持跨图推理**（比如"比较图 A 和图 B"）。多图就是多次请求，服务默认 2 实例并行执行：
+
+```python
+# 异步接口：N 张图立刻拿到 N 个 job_id，由 2 个实例并行处理
+jobs = [submit(task="detection", text="person", image=b64(p)) for p in paths]
+results = [wait(j["job_id"]) for j in jobs]     # 每个结果里带 worker 编号
+```
+
+- 异步接口天然支持：提交不阻塞，队列 FIFO，超 `--max-queue` 才 429
+- OpenAI 接口是同步的，多图用线程池/进程池并发（服务端同样是 2 实例）
+- 没有做"批量接口"因为模型不共享计算：批量只会排队，不会更快
+
+#### 渐进式（先粗后细）
+
+利用常驻模型把一次大请求拆成两步，第二步只看关心的区域——更快、更准，也省 token：
+
+```
+步骤 1  detection / grounding_single     → 拿到候选框（原图坐标）
+步骤 2  用这些框 + target_region_indexes  → region_ocr / brief_region_caption
+```
+
+实测（`water_bottles_table.jpg`）：
+
+| 步骤 | 请求 | 结果 |
+|---|---|---|
+| 1 | `detection`，`text="bottle"` | 6 个框，`cold_start=false` |
+| 2 | `region_ocr`，`bbox_list=步骤1的框`，`target_region_indexes=[0]` | **1.24 s**，`load_ms=0`（模型常驻，无重载） |
+| 2b | `brief_region_caption`，同一框 | `<ground>a bottle of water</ground>` |
+
+```python
+d = wait(submit(task="detection", text="bottle", lang="en", image=img)["job_id"])
+boxes = [[b["xmin"], b["ymin"], b["xmax"], b["ymax"]] for b in d["result"]["result_bbox_list"]]
+
+o = wait(submit(task="region_ocr", text="read", lang="en", image=img,
+                bbox_list=boxes, target_region_indexes=[0])["job_id"])
+print(o["result"]["answer"])          # <ground>...</ground><objects><obj0></objects>
+```
+
+要点：
+
+- 第二步的 `target_region_indexes` 指向**你传入的 `bbox_list`**（顺序即你给的顺序），所以框的顺序要保留
+- 模型常驻时第二步没有加载开销；空闲卸载后再调会先重载（2.9 s）
+- 想对多个框逐个识别就循环提交（每个约 1.2 s），或并发（2 实例并行）
+
+#### 下载带框的可视化图片
+
+三种方式：
+
+```bash
+# 1) 异步接口：先提交时要求渲染，再用独立端点直接下载 PNG
+curl -s localhost:8110/v1/vlx/infer -H 'Content-Type: application/json' \
+  -d '{"task":"detection","text":"bottle","image":"data:image/jpeg;base64,...","render_png":true}'
+# → 202 {"job_id":"job-7", ...}
+curl -s -o result.png localhost:8110/v1/vlx/jobs/job-7/png    # image/png
+```
+
+```json
+// 2) 响应里直接拿 base64（异步接口的 vlx.png_base64 / OpenAI 接口的 vlx.png_base64）
+{"task":"detection","render_png":true, ...}
+```
+
+```bash
+# 3) CLI：默认就会写 <image>_result.png（--no-visualize 关闭）
+./deploy/vlx.sh --task detection --text "bottle" --image-path a.jpg
+ls a_result.png
+```
+
+- `GET /v1/vlx/jobs/{id}/png`：任务未完成 409；没请求 `render_png` 时 400 并提示；PNG 在 job 保留期内（`--job-ttl-s`，默认 1 h）可重复下载
+- PNG 是**处理后的尺寸**（发生缩放时等于 `image.width × height`），而 `result_bbox_list` 是**原图坐标**；要在原图上标注请按 `image.scale` 换算
+- 渲染样式与官方 `inference.py` 一致：红色 3 px 矩形 + 标签（非 ASCII 标签会退化成 `<objN>`）
+
 ## 4. 模型生命周期（实测）
 
 | 场景 | 行为 | 实测 |
