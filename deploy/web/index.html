@@ -59,6 +59,18 @@
   .card .body{display:grid;grid-template-columns:minmax(260px,42%) 1fr;gap:14px;padding:14px}
   @media(max-width:760px){.card .body{grid-template-columns:1fr}}
   .card img.viz{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
+  .hist{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card)}
+  .hist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .hist-head h2{font-size:14px;margin:0}
+  .hist-item{padding:7px 0;border-top:1px solid var(--line);cursor:pointer}
+  .hist-item:first-of-type{border-top:0}
+  .hist-item .h1{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .hist-item .h1 b{color:var(--fg)}
+  .hist-item .h1 .tag{font-size:11px;padding:1px 6px;border-radius:5px;background:#e8f0ff;color:#1d4ed8}
+  .hist-item .h1 .tag.err{background:#fee;color:#b91c1c}
+  .hist-item .h1 .hsum{flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hist-item .hbody{display:none;margin-top:6px;font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-all}
+  .hist-item.open .hbody{display:block}
   .req{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px;margin:0 0 10px;
        padding-bottom:8px;border-bottom:1px dashed var(--line)}
   .req b{color:var(--fg);font-weight:600}
@@ -114,7 +126,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.7</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.8</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -199,6 +211,13 @@
         </div>
         <details style="margin-top:8px"><summary>原始配置</summary><pre class="answer" id="infoRaw" style="margin-top:8px"></pre></details>
       </div>
+      <div class="hist" id="histCard" style="display:none;margin-bottom:14px">
+        <div class="hist-head">
+          <h2>运行记录 <span class="hint" id="histCount"></span></h2>
+          <button class="ghost" id="histClear" style="padding:4px 10px;font-size:12px">清空</button>
+        </div>
+        <div id="histList"></div>
+      </div>
       <div class="results" id="results">
         <div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>
       </div>
@@ -208,6 +227,67 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+
+// ---------- 运行记录（localStorage）----------
+const HIST_KEY = 'vlx_seek_hist_v1';
+const HIST_MAX = 30;
+function histLoad() {
+  try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch { return []; }
+}
+function histSave(list) {
+  try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch {}
+}
+function histPush(rec) {
+  const list = histLoad().filter((x) => x.id !== rec.id);   // 同 job 只留一条
+  list.unshift(rec);
+  histSave(list);
+  histRender();
+}
+function esc2(v) {
+  return String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function histRender() {
+  const list = histLoad();
+  const card = $('#histCard');
+  if (!card) return;
+  card.style.display = list.length ? '' : 'none';
+  $('#histCount').textContent = list.length ? `最近 ${list.length} 条（存在浏览器本地）` : '';
+  $('#histList').innerHTML = list.map((r) => {
+    const ts = new Date(r.ts);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const time = `${p2(ts.getMonth() + 1)}-${p2(ts.getDate())} ${p2(ts.getHours())}:${p2(ts.getMinutes())}:${p2(ts.getSeconds())}`;
+    const ok = r.state === 'done';
+    return `<div class="hist-item" data-id="${esc2(r.id)}">
+      <div class="h1">
+        <span class="tag ${ok ? '' : 'err'}">${ok ? '成功' : '失败'}</span>
+        <b>${esc2(r.task)}</b>
+        <span>${time}</span>
+        <span>总耗时 ${(r.wallMs / 1000).toFixed(2)} s</span>
+        <span>服务端 ${Math.round(r.e2e || 0)} ms</span>
+        <span>${r.boxes ? r.boxes + ' 框' : '无框'}</span>
+        <span class="hsum">${esc2((r.answer || '').slice(0, 80))}</span>
+      </div>
+      <div class="hbody">${esc2([
+        `task ${r.task} · lang ${r.lang} · bbox ${r.nBoxes ?? 0}` + (r.text ? ` · text ${r.text}` : '') +
+        ((r.targets && r.targets.length) ? ` · targets [${r.targets.join(',')}]` : ''),
+        `图片 ${r.imageBytes ? (r.imageBytes / 1024 / 1024).toFixed(2) + ' MB' : '–'} · 总耗时 ${(r.wallMs / 1000).toFixed(2)} s · 服务端 e2e ${Math.round(r.e2e || 0)} ms`,
+        `预处理 ${Math.round(r.preprocess || 0)} ms · 推理 ${Math.round(r.inference || 0)} ms · 解码 ${Math.round(r.decode || 0)} ms` +
+        (r.decodeTps ? ` (${r.decodeTps.toFixed(1)} tok/s)` : '') + ` · tokens ${r.tokens ?? '?'}`,
+        '—'.repeat(20),
+        r.answer || '(空)',
+      ].join('\n'))}</div>
+    </div>`;
+  }).join('');
+  $('#histList').querySelectorAll('.hist-item').forEach((el) => {
+    el.onclick = () => el.classList.toggle('open');
+  });
+}
+$('#histClear').onclick = () => {
+  if (!confirm('清空本地运行记录？')) return;
+  histSave([]);
+  histRender();
+};
+histRender();   // 页面加载时显示历史记录
 const state = { key: sessionStorage.getItem('vlx_api_key') || '', files: [], info: null, running: 0 };
 
 // ---------- 基础请求 ----------
@@ -476,6 +556,8 @@ async function submitOne(name, image) {
     await new Promise((r) => setTimeout(r, 300));
     if (Date.now() - t0 > MAX_WAIT_MS) {
       setState(el, 'failed');
+      histPush({ id: job.job_id, ts: Date.now(), state: 'timeout', task: job.task || '?', lang: '', text: '',
+                 boxes: 0, wallMs: Date.now() - t0, answer: '超时未完成', e2e: 0 });
       failCard(el, `超时：请求超过 ${MAX_WAIT_MS / 60000} 分钟仍未完成（job ${job.job_id}）。` +
                   '可以到服务端日志或 /v1/vlx/jobs 查看状态。');
       return;
@@ -588,6 +670,17 @@ async function renderJob(el, job, wallMs) {
 
   // 图片最后异步取：不阻塞 answer / 参数 / 框列表的渲染
   loadViz(el, job);
+
+  // 写入本地运行记录
+  histPush({
+    id: job.job_id, ts: Date.now(), state: job.state,
+    task: rq.task, lang: rq.lang, text: rq.text, nBoxes: rq.n_boxes,
+    targets: rq.target_region_indexes || [], imageBytes: rq.image_bytes,
+    renderPng: !!rq.render_png, wallMs,
+    e2e: t.e2e_ms, preprocess: t.preprocess_ms, inference: t.inference_ms,
+    decode: t.decode_ms, decodeTps: (t.decode_ms > 0 && res.completion_tokens) ? res.completion_tokens / (t.decode_ms / 1000) : 0,
+    tokens: res.completion_tokens, boxes: boxes.length, answer: res.answer || '',
+  });
 }
 
 // 异步加载带框图（失败不影响文本结果）
