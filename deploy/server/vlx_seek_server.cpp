@@ -307,6 +307,8 @@ class VlxServer {
         uint64_t runs = 0;
         bool busy = false;                 // 仅本线程读写（用于状态快照）
         std::atomic<bool> unload_requested{false};
+        std::atomic<bool> reload_requested{false};
+        std::atomic<uint64_t> reload_gen{0};   // 目标重启代数
     };
 
     struct WorkerSnapshot {
@@ -317,6 +319,7 @@ class VlxServer {
         uint64_t runs = 0;
         std::string last_error;
         std::string device;   // backend 解析到的设备名，如 CUDA0
+        uint64_t reload_done_gen = 0;
     };
 
     // ---- worker 侧 ----
@@ -347,6 +350,7 @@ class VlxServer {
     void handle_health(const httplib::Request& req, httplib::Response& res);
     void handle_info(const httplib::Request& req, httplib::Response& res);
     void handle_unload(const httplib::Request& req, httplib::Response& res);
+    void handle_reload(const httplib::Request& req, httplib::Response& res);
     void handle_metrics(const httplib::Request& req, httplib::Response& res);
 
     // ---- 内部 ----
@@ -370,6 +374,7 @@ class VlxServer {
     std::thread reaper_;
     std::atomic<bool> stop_{false};
     std::atomic<uint64_t> next_job_{1};
+    std::atomic<uint64_t> reload_gen_{0};
 
     // 统计
     std::atomic<uint64_t> total_ok_{0};
@@ -383,6 +388,40 @@ class VlxServer {
     // 由 mu_ 保护（只在持锁时读写）
     double sum_inference_ms_ = 0.0;
     double sum_e2e_ms_ = 0.0;
+
+    // 吞吐采样：最近 60 s 内完成请求的 (完成时间, completion tokens, inference ms)
+    struct TpsSample {
+        int64_t ts_ms;
+        int tokens;
+        double inference_ms;
+    };
+    std::deque<TpsSample> tps_samples_;
+    double last_decode_tps_ = 0.0;
+    json tps_json_locked() const {
+        const int64_t now = now_ms();
+        json out;
+        for (int win : {10, 60}) {
+            int64_t oldest = now;
+            long long tokens = 0;
+            double inf_ms = 0.0;
+            int n = 0;
+            for (auto it = tps_samples_.rbegin(); it != tps_samples_.rend(); ++it) {
+                if (it->ts_ms < now - int64_t(win) * 1000) break;
+                tokens += it->tokens;
+                inf_ms += it->inference_ms;
+                oldest = it->ts_ms;
+                ++n;
+            }
+            const double elapsed = std::max(1.0, double(now - oldest) / 1000.0);
+            const std::string k = std::to_string(win) + "s";
+            out[k] = {{"tps", n ? double(tokens) / elapsed : 0.0},
+                      {"tokens", tokens},
+                      {"requests", n},
+                      {"active_tps", inf_ms > 0 ? double(tokens) / (inf_ms / 1000.0) : 0.0}};
+        }
+        out["last_decode_tps"] = last_decode_tps_;
+        return out;
+    }
 };
 
 // ============================================================================
@@ -622,6 +661,41 @@ void VlxServer::worker_loop(int idx) {
             cv_.notify_all();
         }
         maybe_unload(w);
+        // 重启请求：卸载后立即重新加载 + 预热
+        if (w.reload_requested.exchange(false) && !w.ctx && !stop_.load()) {
+            const uint64_t gen = w.reload_gen.load();
+            const int64_t t0 = now_ms();
+            std::string err;
+            vlx_seek_ctx* ctx = load_ctx(&err);
+            if (ctx) {
+                warmup_ctx(ctx);
+                w.ctx = ctx;
+                w.ctx_load_ms = double(now_ms() - t0);
+                w.last_used_ms.store(now_ms());
+                load_count_.fetch_add(1);
+                {
+                    const char* dev = vlx_seek_context_device(ctx);
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (size_t(w.idx) < snapshots_.size())
+                        snapshots_[size_t(w.idx)].device = dev ? dev : "";
+                }
+                publish_state(w, "loaded");
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (size_t(w.idx) < snapshots_.size())
+                        snapshots_[size_t(w.idx)].reload_done_gen = gen;
+                }
+                logmsg(1, "worker %d: reloaded in %.0f ms", w.idx, w.ctx_load_ms);
+            } else {
+                logmsg(3, "worker %d: reload failed: %s", w.idx, err.c_str());
+                std::lock_guard<std::mutex> lk(mu_);
+                if (size_t(w.idx) < snapshots_.size()) {
+                    snapshots_[size_t(w.idx)].state = "error";
+                    snapshots_[size_t(w.idx)].last_error = err;
+                }
+            }
+            cv_.notify_all();
+        }
     }
 
     w.busy = false;
@@ -816,6 +890,23 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
             if (job->timings.contains("e2e_ms"))
                 sum_e2e_ms_ += job->timings["e2e_ms"].get<double>();
             finished_runs_.fetch_add(1);
+            {
+                const int64_t ct_now = job->finished_ms;
+                const double inf = job->timings.value("inference_ms", 0.0);
+                const int ct_n = job->result.contains("completion_tokens")
+                                     ? job->result["completion_tokens"].get<int>()
+                                     : 0;
+                TpsSample sample;
+                sample.ts_ms = ct_now;
+                sample.tokens = ct_n;
+                sample.inference_ms = inf;
+                tps_samples_.push_back(sample);
+                if (inf > 0 && ct_n > 0) last_decode_tps_ = double(ct_n) / (inf / 1000.0);
+                while (!tps_samples_.empty() &&
+                       tps_samples_.front().ts_ms < ct_now - 60000) {
+                    tps_samples_.pop_front();
+                }
+            }
         }
         if (size_t(w.idx) < snapshots_.size()) {
             snapshots_[size_t(w.idx)].state = w.ctx ? "loaded" : "unloaded";
@@ -946,6 +1037,7 @@ void VlxServer::install_routes() {
     http_.Get("/metrics", [this](const auto& r, auto& s) { handle_metrics(r, s); });
     http_.Get("/v1/vlx/info", [this](const auto& r, auto& s) { handle_info(r, s); });
     http_.Post("/v1/vlx/unload", [this](const auto& r, auto& s) { handle_unload(r, s); });
+    http_.Post("/v1/vlx/reload", [this](const auto& r, auto& s) { handle_reload(r, s); });
     http_.Post("/v1/vlx/infer", [this](const auto& r, auto& s) { handle_infer(r, s); });
     // OpenAI 兼容层（同步）：/v1/models + /v1/chat/completions
     http_.Get("/v1/models", [this](const auto& r, auto& s) { handle_openai_models(r, s); });
@@ -967,11 +1059,10 @@ void VlxServer::install_routes() {
 }
 
 // API key 校验：Authorization: Bearer <key> 或 X-API-Key: <key>。
-// /healthz 豁免（探活不需要凭证）；其余 /v1/* 与 /metrics 全部保护。
+// 启用后**所有接口**（含 /healthz、/metrics）都需要凭证；只有登录页 HTML 是静态的。
 // 配置为空 = 不启用认证。支持逗号分隔的多个 key，便于轮换。
 bool VlxServer::authorized(const httplib::Request& req) const {
     if (opts_.api_key.empty()) return true;
-    if (req.path == "/healthz") return true;
     std::string token;
     const std::string auth = req.get_header_value("Authorization");
     if (auth.rfind("Bearer ", 0) == 0) {
@@ -1558,13 +1649,19 @@ void VlxServer::handle_health(const httplib::Request&, httplib::Response& res) {
                                {"last_error", s.last_error.empty() ? json(nullptr) : json(s.last_error)}});
         }
     }
+    json tps;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        tps = tps_json_locked();
+    }
     json j{{"status", "ok"},
            {"model_loaded", any_loaded},
            {"workers_loaded", 0},
            {"queue_depth", queue_depth},
            {"idle_unload_s", opts_.idle_unload_s},
            {"instances", opts_.instances},
-           {"workers", workers}};
+           {"workers", workers},
+           {"tps", tps}};
     size_t loaded_n = 0;
     for (const auto& w : workers)
         if (w["model_loaded"].get<bool>()) ++loaded_n;
@@ -1576,7 +1673,7 @@ std::string VlxServer::models_info_json() const {
     return json{{"device", opts_.device},
                 {"gpu", opts_.gpu.empty() ? json(nullptr) : json(opts_.gpu)},
                 {"auth_enabled", !opts_.api_key.empty()},
-                {"endpoints", json::array({"/v1/vlx/infer (async)", "/v1/vlx/jobs/{id}", "/v1/vlx/jobs/{id}/png", "/v1/chat/completions (OpenAI, sync)", "/v1/models", "/healthz", "/metrics"})},
+                {"endpoints", json::array({"/v1/vlx/infer (async)", "/v1/vlx/jobs/{id}", "/v1/vlx/reload", "/v1/vlx/jobs/{id}/png", "/v1/chat/completions (OpenAI, sync)", "/v1/models", "/healthz", "/metrics"})},
                 {"auth_header", opts_.api_key.empty() ? json(nullptr) : json("Authorization: Bearer <key>")},
                 {"cuda_visible_devices",
                  std::getenv("CUDA_VISIBLE_DEVICES") ? json(std::getenv("CUDA_VISIBLE_DEVICES"))
@@ -1673,6 +1770,56 @@ void VlxServer::handle_unload(const httplib::Request& req, httplib::Response& re
                     "application/json");
 }
 
+
+// POST /v1/vlx/reload?wait=1 —— 卸载并重新加载模型（等价于"软重启"，不需要 systemd 权限）
+void VlxServer::handle_reload(const httplib::Request& req, httplib::Response& res) {
+    const bool wait = req.has_param("wait") && req.get_param_value("wait") != "0";
+    int timeout_ms = 120000;
+    if (req.has_param("timeout_ms")) {
+        try {
+            timeout_ms = std::max(1000, std::stoi(req.get_param_value("timeout_ms")));
+        } catch (...) {
+            timeout_ms = 120000;
+        }
+    }
+    // 代数递增：只有 worker 完成 >= 本次代数的重载才算完成（避免读到卸载前的 loaded）
+    const uint64_t gen = reload_gen_.fetch_add(1) + 1;
+    for (auto& w : workers_) {
+        w->reload_gen.store(gen);
+        w->unload_requested.store(true);
+        w->reload_requested.store(true);
+    }
+    cv_.notify_all();
+
+    json result = json::array();
+    const int64_t deadline = now_ms() + timeout_ms;
+    for (auto& w : workers_) {
+        bool loaded = false;
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                const auto& s = snapshots_[size_t(w->idx)];
+                if (s.reload_done_gen >= gen && s.state == "loaded") {
+                    loaded = true;
+                    break;
+                }
+                if (s.reload_done_gen >= gen && s.state == "error") break;
+            }
+            if (!wait || now_ms() >= deadline) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        const auto& s = snapshots_[size_t(w->idx)];
+        result.push_back({{"worker", w->idx},
+                          {"loaded", loaded},
+                          {"state", s.state},
+                          {"load_ms", s.load_ms},
+                          {"error", s.last_error.empty() ? json(nullptr) : json(s.last_error)}});
+    }
+    res.set_content(json{{"reloaded", true}, {"wait", wait}, {"workers", result}}.dump(),
+                    "application/json");
+}
+
 void VlxServer::handle_metrics(const httplib::Request&, httplib::Response& res) {
     std::string out;
     auto line = [&](const std::string& name, const std::string& value,
@@ -1689,6 +1836,14 @@ void VlxServer::handle_metrics(const httplib::Request&, httplib::Response& res) 
     line("vlx_requests_cancelled_total", std::to_string(total_cancelled_.load()));
     line("vlx_model_loads_total", std::to_string(load_count_.load()));
     line("vlx_model_unloads_total", std::to_string(unload_count_.load()));
+    {
+        const json t = tps_json_locked();
+        line("vlx_tokens_per_second", std::to_string(t["10s"]["tps"].get<double>()),
+             "Completion tokens per second (10s window)");
+        line("vlx_tokens_per_second_60s", std::to_string(t["60s"]["tps"].get<double>()));
+        line("vlx_active_tokens_per_second", std::to_string(t["10s"]["active_tps"].get<double>()),
+             "Completion tokens per second over busy inference time (10s window)");
+    }
     line("vlx_prompt_tokens_total", std::to_string(total_prompt_tokens_.load()));
     line("vlx_completion_tokens_total", std::to_string(total_completion_tokens_.load()));
     for (size_t i = 0; i < snapshots_.size(); ++i) {
@@ -1826,7 +1981,7 @@ int main(int argc, char** argv) {
     } else {
         size_t n = 1;
         for (char c : opts.api_key) n += (c == ',');
-        logmsg(1, "API key: enabled (%zu key%s); /healthz stays open", n, n == 1 ? "" : "s");
+        logmsg(1, "API key: enabled (%zu key%s); all endpoints require the key", n, n == 1 ? "" : "s");
     }
 
     // GPU 选择：必须在任何 CUDA/ggml 初始化之前设置（进程级生效，视觉链与

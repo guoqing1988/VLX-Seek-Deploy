@@ -187,7 +187,7 @@ print(resp.model_extra["vlx"]["result_bbox_list"])  # 框 + timings
 
 ### API key 认证
 
-默认关闭；启用后保护 `/v1/vlx/*` 与 `/metrics`，`/healthz` 保持开放（探活）。
+默认关闭；启用后**所有接口都需要 key**（含 `/healthz`、`/metrics`），登录页 HTML 除外。
 
 ```bash
 ./deploy/server/serve.sh --api-key "sk-vlx-xxx"     # 或 deploy/.env 里 API_KEY=sk-vlx-xxx

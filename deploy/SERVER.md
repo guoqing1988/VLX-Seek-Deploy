@@ -183,7 +183,7 @@ GPU=1 PORT=8111 INSTANCES=2 ./deploy/server/serve.sh --preload
 
 ### 3.2.2 API key 认证
 
-默认关闭；启用后保护 `/v1/vlx/*` 与 `/metrics`，**`/healthz` 保持开放**（探活用）。
+默认关闭；启用后**所有接口都需要 key**（`/v1/vlx/*`、`/v1/models`、`/v1/chat/completions`、`/healthz`、`/metrics`），只有登录页 HTML 是静态的。
 
 ```bash
 # 启用（二选一）
@@ -263,6 +263,8 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 | `GET /healthz` | `model_loaded`、每 worker 的 `state/busy/load_ms/runs`、`queue_depth`。**不触发加载** |
 | `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e），含 `endpoints` 列表 |
 | `POST /v1/vlx/unload?wait=1&timeout_ms=30000` | 强制卸载；`wait=1` 等到 worker 真正释放 |
+| `POST /v1/vlx/reload?wait=1` | **软重启**：卸载并重新加载模型（约 3–5 s/实例，含预热），返回每个 worker 的 `load_ms` |
+| `GET /healthz` 的 `tps` | 实时吞吐：`10s/60s` 窗口的 `tps`（含空闲）、`active_tps`（仅忙时）、`last_decode_tps` |
 | `GET /v1/vlx/jobs?limit=50&state=done` | 任务列表（新的在前） |
 | `DELETE /v1/vlx/jobs/{id}` | 取消排队中的任务（运行中返回 409） |
 | `GET /v1/vlx/jobs/{id}/png` | 下载带框的可视化 PNG（需提交时 `render_png=true`；未完成 409） |
@@ -522,7 +524,7 @@ ls a_result.png
 
 | 功能 | 说明 |
 |---|---|
-| 状态条 | `/healthz`：模型是否加载、实例数、队列深度（不需要 key） |
+| 状态条 | `/healthz`：模型是否加载、实例数、队列深度、**实时 TPS**（登录后自动带 key） |
 | 服务信息 | `/v1/vlx/info`：精度、实例数、认证状态、图像预算、成功/失败计数 |
 | 多图上传 | 拖拽或选择，多张会逐个提交（服务端 2 实例并行） |
 | 图片 URL | 每行一个 http(s) 地址 |
@@ -699,7 +701,7 @@ python3 deploy/server/test_server.py    # 65 项断言，自动起停服务
 热请求延迟 → 空闲卸载（显示 + 显存归零）→ 卸载后自动重载 → 手动卸载 → /metrics →
 2 实例并发（不同 worker）→ 取消排队任务 → /v1/vlx/info 统计 → URL 图像输入/404/协议校验 →
 2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图 →
-API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换 →
+API key：所有接口（含 healthz/metrics）都要 key，无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换 →
 OpenAI 兼容：/v1/models、chat.completion + usage + vlx 框、无图/temperature>0/stream 400、vqa 自由文本 →
 可视化：`render_png` 返回 base64、`GET /jobs/{id}/png` 下载（PNG 尺寸=原图）、未请求渲染时 400 →
 渐进式：detection 的框喂给 brief_region_caption 且 `load_ms=0`（模型常驻）。

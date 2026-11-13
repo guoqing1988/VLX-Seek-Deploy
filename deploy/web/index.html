@@ -67,6 +67,15 @@
   .empty{color:var(--muted);padding:24px;text-align:center;border:1px dashed var(--line);border-radius:12px}
   .kbd{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
   details summary{cursor:pointer;color:var(--muted);font-size:12px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat .k{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+  .stat b{font-size:20px;font-variant-numeric:tabular-nums}
+  .stat b small{font-size:11px;color:var(--muted);font-weight:400}
+  .wstate{display:inline-flex;gap:6px;align-items:center;font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#555}
+  .dot.on{background:var(--ok)} .dot.busy{background:var(--warn)} .dot.off{background:#555}
 </style>
 </head>
 <body>
@@ -89,6 +98,7 @@
     <span class="title">VLX-Seek 1.5-10B</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
+    <span class="pill" id="pTps">TPS –</span>
     <span class="spacer"></span>
     <button class="ghost" id="refreshBtn">刷新状态</button>
     <button class="ghost" id="logoutBtn">退出</button>
@@ -152,9 +162,23 @@
 
     <section>
       <div class="panel" id="infoPanel" style="margin-bottom:14px">
-        <h2>服务信息</h2>
-        <div class="meta" id="infoMeta">–</div>
-        <details><summary>原始配置</summary><pre class="answer" id="infoRaw" style="margin-top:8px"></pre></details>
+        <h2>服务状态（每 2 秒刷新）</h2>
+        <div class="stats">
+          <div class="stat"><span class="k">实时 TPS（10s 窗口）</span><b id="tpsNow">–</b></div>
+          <div class="stat"><span class="k">TPS（60s 窗口）</span><b id="tps60">–</b></div>
+          <div class="stat"><span class="k">推理时 TPS（忙时）</span><b id="tpsActive">–</b></div>
+          <div class="stat"><span class="k">队列深度</span><b id="qDepth">–</b></div>
+        </div>
+        <table>
+          <thead><tr><th>worker</th><th>状态</th><th>设备</th><th>加载耗时</th><th>已处理</th></tr></thead>
+          <tbody id="workersBody"><tr><td colspan="5" class="empty" style="border:0">–</td></tr></tbody>
+        </table>
+        <div class="meta" id="infoMeta" style="margin-top:10px">–</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+          <button class="ghost" id="reloadBtn">重启模型（卸载并重新加载）</button>
+          <span class="hint" id="reloadMsg"></span>
+        </div>
+        <details style="margin-top:8px"><summary>原始配置</summary><pre class="answer" id="infoRaw" style="margin-top:8px"></pre></details>
       </div>
       <div class="results" id="results">
         <div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>
@@ -208,17 +232,39 @@ function showApp() {
   $('#app').hidden = false;
   refreshHealth();
   refreshInfo();
+  setInterval(() => { if (!document.hidden) refreshHealth(); }, 2000);
+  setInterval(() => { if (!document.hidden) refreshInfo(); }, 15000);
 }
 $('#logoutBtn').onclick = () => { sessionStorage.removeItem('vlx_api_key'); location.reload(); };
 
 // ---------- 状态 ----------
+function fmtTps(v) { return (v == null ? '–' : (v >= 10 ? v.toFixed(0) : v.toFixed(1))); }
+
 async function refreshHealth() {
   try {
-    const r = await fetch('/healthz');           // 探活接口不需要 key
+    const r = await fetch('/healthz', { headers: { Authorization: 'Bearer ' + state.key } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const h = await r.json();
     $('#pHealth').textContent = h.model_loaded ? `模型已加载 · ${h.workers_loaded}/${h.instances}` : '模型未加载（按需加载）';
     $('#pHealth').className = 'pill ' + (h.model_loaded ? 'on' : 'off');
     $('#pQueue').textContent = '队列 ' + h.queue_depth;
+    const t = h.tps || {};
+    const t10 = t['10s'] || {}, t60 = t['60s'] || {};
+    $('#pTps').textContent = 'TPS ' + fmtTps(t10.tps);
+    $('#pTps').className = 'pill ' + (t10.tps > 0.05 ? 'on' : 'off');
+    $('#tpsNow').innerHTML = fmtTps(t10.tps) + ' <small>tok/s</small>';
+    $('#tps60').innerHTML = fmtTps(t60.tps) + ' <small>tok/s</small>';
+    $('#tpsActive').innerHTML = fmtTps(t10.active_tps) + ' <small>tok/s</small>';
+    $('#qDepth').textContent = h.queue_depth;
+    const rows = (h.workers || []).map((w) => {
+      const cls = w.state === 'loaded' ? 'on' : (w.state === 'running' ? 'busy' : 'off');
+      return `<tr><td>#${w.worker}</td>
+        <td><span class="wstate"><span class="dot ${cls}"></span>${w.state}${w.busy ? ' · busy' : ''}</span></td>
+        <td>${w.device || '–'}</td>
+        <td>${w.load_ms ? Math.round(w.load_ms) + ' ms' : '–'}</td>
+        <td>${w.runs ?? 0}</td></tr>`;
+    }).join('');
+    $('#workersBody').innerHTML = rows || '<tr><td colspan="5">–</td></tr>';
   } catch { $('#pHealth').textContent = '服务不可达'; $('#pHealth').className = 'pill off'; }
 }
 async function refreshInfo() {
@@ -235,9 +281,34 @@ async function refreshInfo() {
       `加载次数 <b>${d.stats.model_loads}</b>`
     ].join(' · ');
     $('#infoRaw').textContent = JSON.stringify(d.config, null, 2);
+    $('#infoMeta').innerHTML = [
+      `累计成功 <b>${d.stats.requests_ok}</b> / 失败 <b>${d.stats.requests_failed}</b>`,
+      `平均 inference <b>${Math.round(d.stats.avg_inference_ms)} ms</b>`,
+      `平均 e2e <b>${Math.round(d.stats.avg_e2e_ms)} ms</b>`,
+      `加载 <b>${d.stats.model_loads}</b> 次`
+    ].join(' · ');
   } catch (e) { $('#infoMeta').textContent = '读取失败：' + e.message; }
 }
 $('#refreshBtn').onclick = () => { refreshHealth(); refreshInfo(); };
+
+$('#reloadBtn').onclick = async () => {
+  if (!confirm('重启模型：卸载当前模型并重新加载（约 5-10 秒，期间任务会排队 / 失败）。继续？')) return;
+  const btn = $('#reloadBtn'); btn.disabled = true;
+  $('#reloadMsg').textContent = '正在重启…';
+  try {
+    const d = await api('/v1/vlx/reload?wait=1', { method: 'POST' });
+    const ok = (d.workers || []).filter((w) => w.loaded).length;
+    $('#reloadMsg').textContent = `完成：${ok}/${(d.workers || []).length} 个实例已重载（` +
+      (d.workers || []).map((w) => `#${w.worker} ${w.loaded ? Math.round(w.load_ms) + 'ms' : w.state}`).join('，') + '）';
+  } catch (e) {
+    $('#reloadMsg').textContent = '重启失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+    refreshHealth(); refreshInfo();
+  }
+};
+
+
 
 // ---------- 文件选择 ----------
 const drop = $('#drop');

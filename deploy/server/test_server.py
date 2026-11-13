@@ -75,7 +75,8 @@ def gpu_mem_for_pid(pid: int) -> int:
 
 class Service:
     def __init__(self, port: int, instances: int, idle_s: int, tag: str,
-                 args: list[str] | None = None):
+                 args: list[str] | None = None, api_key: str | None = None):
+        self.api_key = api_key
         self.port = port
         self.base = f"http://127.0.0.1:{port}"
         self.tag = tag
@@ -89,11 +90,14 @@ class Service:
             stdout=self.log, stderr=subprocess.STDOUT)
         self.pid = self.proc.pid
 
+    def _auth(self) -> dict:
+        return {"Authorization": "Bearer " + self.api_key} if self.api_key else {}
+
     def wait_ready(self, timeout: float = 60) -> bool:
         t0 = time.time()
         while time.time() - t0 < timeout:
             try:
-                code, _ = http("GET", self.base + "/healthz", timeout=2)
+                code, _ = http("GET", self.base + "/healthz", timeout=2, headers=self._auth())
                 if code == 200:
                     return True
             except Exception:
@@ -104,20 +108,21 @@ class Service:
         return False
 
     def health(self) -> dict:
-        return json.loads(http("GET", self.base + "/healthz")[1])
+        return json.loads(http("GET", self.base + "/healthz", headers=self._auth())[1])
 
     def submit(self, image_path: Path | None = None, **fields) -> tuple[int, dict]:
         src = image_path or IMAGE
         body = {"task": "detection", "text": "orange; apple", "lang": "zh",
                 "image": base64.b64encode(src.read_bytes()).decode(), **fields}
-        code, text = http("POST", self.base + "/v1/vlx/infer", body)
+        code, text = http("POST", self.base + "/v1/vlx/infer", body, headers=self._auth())
         return code, json.loads(text)
 
     def wait_job(self, job_id: str, timeout: float = 180,
                  headers: dict | None = None) -> dict:
         t0 = time.time()
         while time.time() - t0 < timeout:
-            code, text = http("GET", f"{self.base}/v1/vlx/jobs/{job_id}", headers=headers)
+            hdrs = dict(self._auth()); hdrs.update(headers or {})
+            code, text = http("GET", f"{self.base}/v1/vlx/jobs/{job_id}", headers=hdrs)
             job = json.loads(text)
             if job["state"] in ("done", "failed", "cancelled"):
                 return job
@@ -350,10 +355,13 @@ def phase_e() -> None:
     """API key 认证"""
     print("\n=== Phase E：API key 认证 ===")
     svc = Service(port=8115, instances=1, idle_s=0, tag="e",
-                  args=["--api-key", "smoke-key-1,smoke-key-2"])
+                  args=["--api-key", "smoke-key-1,smoke-key-2"], api_key="smoke-key-1")
     try:
         check(svc.wait_ready(), "带 API key 的服务启动")
-        check(http("GET", svc.base + "/healthz")[0] == 200, "/healthz 不需要 key（探活）")
+        check(http("GET", svc.base + "/healthz")[0] == 401, "/healthz 也需要 key（无 key 401）")
+        check(http("GET", svc.base + "/healthz",
+                   headers={"Authorization": "Bearer smoke-key-1"})[0] == 200,
+              "/healthz 带 key 可访问")
         check(http("GET", svc.base + "/v1/vlx/info")[0] == 401, "/v1/vlx/info 无 key 返回 401")
         check(http("GET", svc.base + "/metrics")[0] == 401, "/metrics 无 key 返回 401")
         check(http("POST", svc.base + "/v1/vlx/infer",
@@ -486,6 +494,48 @@ def phase_g() -> None:
         svc.stop()
 
 
+def phase_h() -> None:
+    """实时 TPS + 模型重载（软重启）"""
+    print("\n=== Phase H：实时 TPS / 重载 ===")
+    svc = Service(port=8118, instances=1, idle_s=0, tag="h")
+    try:
+        check(svc.wait_ready(), "服务启动")
+        h = svc.health()
+        t = h.get("tps") or {}
+        check("10s" in t and "60s" in t and "last_decode_tps" in t,
+              "/healthz 暴露 TPS 字段", str(list(t))[:60])
+
+        code, r = svc.submit(task="detection", text="orange; apple", lang="zh")
+        job = svc.wait_job(r["job_id"], timeout=240)
+        check(job["state"] == "done", "任务完成（产生吞吐数据）")
+        h = svc.health()
+        t = h.get("tps") or {}
+        check(float(t.get("last_decode_tps", 0)) > 1.0, "记录最近请求 tok/s",
+              f"{t.get('last_decode_tps', 0):.1f} tok/s")
+        check(float((t.get("10s") or {}).get("tps", 0)) > 0, "10s 窗口 TPS > 0",
+              f"{(t.get('10s') or {}).get('tps', 0):.1f} tok/s")
+
+        code, text = http("GET", svc.base + "/metrics")
+        check("vlx_tokens_per_second" in text, "/metrics 暴露 TPS 指标")
+
+        t0 = time.time()
+        code, body = http("POST", svc.base + "/v1/vlx/reload?wait=1", {})
+        reload_ms = (time.time() - t0) * 1000
+        d = json.loads(body) if code == 200 else {}
+        workers = d.get("workers") or []
+        check(code == 200 and workers and all(w["loaded"] for w in workers),
+              "POST /v1/vlx/reload 重载所有实例",
+              f"{reload_ms:.0f} ms, load_ms={[round(w['load_ms']) for w in workers]}")
+        check(reload_ms > 500, "reload 会等待真正重载完成（不提前返回）",
+              f"{reload_ms:.0f} ms")
+
+        code, r = svc.submit(task="vqa", text="what is this?", lang="en")
+        job = svc.wait_job(r["job_id"], timeout=240)
+        check(job["state"] == "done", "重载后推理正常")
+    finally:
+        svc.stop()
+
+
 def main() -> int:
     if not BIN.exists():
         print(f"缺少服务二进制：{BIN}\n先运行 deploy/server/build-server.sh")
@@ -509,6 +559,7 @@ def main() -> int:
     phase_e()
     phase_f()
     phase_g()
+    phase_h()
     print(f"\n=== 结果：PASS {PASS} / FAIL {FAIL} ===")
     return 0 if FAIL == 0 else 1
 
