@@ -12,7 +12,7 @@
 | 显存需求 | 单请求整链峰值 **≈ 9.2–9.5 GiB**（q8_0 LLM 主导）；视觉链阶段峰值 f16 1.5 GiB / q8_0 1.2 GiB；Wedetect 阶段 0.9 GiB |
 | 内存需求 | 进程峰值 RSS **10.7–11.6 GiB**（GGUF 走 mmap，计入 page cache）；系统可用内存下降同量级 |
 | 吞吐（RTX 5880 Ada，单路） | 解码 **≈ 88 tok/s**（稳定，q8_0/f16 视觉链相同，因为 LLM 都是 q8_0）；预填充 **7.4k–7.9k tok/s** |
-| 常驻服务（`deploy/server/`） | 已用 systemd 托管（软链 + `deploy/.env`，默认 `0.0.0.0:8110`，多卡可用 `--gpu N` / `.env` 的 `GPU=` 指定；支持 `--api-key` 认证；同时提供 OpenAI 兼容的 `/v1/chat/completions`）；热请求端到端 **0.52–0.74 s**（CLI 3.3–4.1 s）；懒加载首请求 2.9 s；空闲 300 s 自动卸载、显存归零；2 实例 22.2 GiB；支持 base64/data URL/http(s) URL；超分辨率预算（默认 1280×960）自动等比缩小并映射回原图坐标（见 `SERVER.md` §6.1） |
+| 常驻服务（`deploy/server/`） | 已用 systemd 托管（软链 + `deploy/.env`，默认 `0.0.0.0:8110`，多卡可用 `--gpu N` / `.env` 的 `GPU=` 指定；支持 `--api-key` 认证；同时提供 OpenAI 兼容的 `/v1/chat/completions`）；热请求端到端 **0.52–0.74 s**（CLI 3.3–4.1 s）；懒加载首请求 2.9 s；空闲 300 s 自动卸载、显存归零；2 实例 22.6 GiB；支持 base64/data URL/http(s) URL；超分辨率预算（默认 1280×960）自动等比缩小并映射回原图坐标（见 `SERVER.md` §6.1） |
 | 并发吞吐 | 2 路并发合计 **137 tok/s**（单路 88 → 每路下降，显存线性叠加，2 路需 ≈ 19 GiB） |
 | 单请求端到端（含冷启动） | 3.3–4.1 s（q8_0）/ 3.6–4.5 s（f16 视觉）；其中 LLM 权重加载 ≈ 1.2 s + GGUF 解析 ≈ 0.5 s |
 | CPU 模式 | 不可用：视觉链 15–18 s、WeDetect 23.6 s、解码 **0.25 tok/s** |
@@ -147,7 +147,7 @@ GPU 显存时间线（f16，单个请求）：
 4127ms  702 MiB   推理结束释放 LLM
 ```
 
-建议：**留 12 GiB 显存**给单实例（9.5 GiB 峰值 + 余量）；系统内存按 **12 GiB** 预留。并发 N 路约需 `9.5×N` GiB 显存（48 GB 卡可放 4–5 路）。
+建议：**留 12 GiB 显存**给单实例（9.5 GiB 峰值 + 余量）；系统内存按 **12 GiB** 预留。服务模式单实例约 12 GiB（`n_ctx=8192`），并发 N 路约 `12×N` GiB；CLI 单进程峰值 9.5 GiB。
 
 ### 5.2 吞吐（单路，3 张测试图 × 3 次重复，取中位数，`--warm-runs 0` 即真实单请求）
 
@@ -259,8 +259,8 @@ E srv   load_model: failed to load multimodal model
 
 ```bash
 ./deploy/server/build-server.sh          # 构建到 deploy/server/build/
-./deploy/server/serve.sh --preload      # 127.0.0.1:8100，2 实例，空闲 300s 卸载
-curl -s localhost:8100/v1/vlx/infer -H 'Content-Type: application/json' \
+./deploy/server/serve.sh --preload      # 默认 8100（本机 .env 设为 8110），2 实例，空闲 300s 卸载
+curl -s localhost:8110/v1/vlx/infer -H 'Content-Type: application/json' \
   -d '{"task":"detection","text":"orange; apple","lang":"zh","image":"data:image/jpeg;base64,..."}'
 # → 202 {"job_id":"job-1",...}   然后 GET /v1/vlx/jobs/job-1 轮询结果
 ```
@@ -291,8 +291,8 @@ python3 deploy/bench.py --precision q8_0 --image water_bottles_table.jpg \
 
 # 常驻推理服务（原生异步接口 + 并发 + 空闲卸载 + 自动重载）
 ./deploy/server/build-server.sh
-sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 59 项验收（需先让出显存）
-./deploy/server/serve.sh --preload                 # 127.0.0.1:8100, 2 实例
+sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 65 项验收（需先让出显存）
+./deploy/server/serve.sh --preload                 # 0.0.0.0:8110, 2 实例
 
 # 可选：纯文本 OpenAI 兼容服务（llama.cpp 原生 llama-server）
 cmake -S cpp_ggml/third_party/llama.cpp -B cpp_ggml/build-server -DCMAKE_BUILD_TYPE=Release \

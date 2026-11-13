@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # 启动 VLX-Seek 常驻服务（原生异步接口）
 #
-#   ./deploy/server/serve.sh                       # 127.0.0.1:8100, 2 实例, 空闲 300s 卸载
+#   ./deploy/server/serve.sh                       # 0.0.0.0:8110（本机 .env）, 2 实例, 空闲 300s 卸载
 #   PORT=8200 INSTANCES=1 ./deploy/server/serve.sh
 #   IDLE_UNLOAD_S=60 ./deploy/server/serve.sh --preload --log-level 0
 #
-# 环境变量：PORT / HOST / INSTANCES / IDLE_UNLOAD_S / PRECISION / DEVICE
+# 环境变量：HOST / PORT / GPU / INSTANCES / IDLE_UNLOAD_S / PRECISION / DEVICE /
+#           IMAGE_PROXY / API_KEY / EXTRA_ARGS（systemd 读 deploy/.env）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

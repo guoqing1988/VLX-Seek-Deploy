@@ -1701,7 +1701,7 @@ void usage() {
                  "用法: vlx-seek-server --gguf-dir DIR [options]\n\n"
                  "  --host H                 监听地址 [0.0.0.0]\n"
                  "  --port N                 监听端口 [8100]\n"
-                 "  --instances N            并发实例数（每实例一个 ctx，约 9.5 GiB 显存）[2]\n"
+                 "  --instances N            并发实例数（每实例一个 ctx，约 12 GiB 显存）[2]\n"
                  "  --idle-unload-s F        空闲多少秒后卸载模型，0=不卸载 [300]\n"
                  "  --preload                启动即加载（默认懒加载）\n"
                  "  --device D               cuda|cpu|vulkan [cuda]\n"

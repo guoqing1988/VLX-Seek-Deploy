@@ -35,7 +35,7 @@
 ```bash
 cd /data/www/VLX-Seek-GGML
 ./deploy/server/build-server.sh        # 独立 CMake 工程，链接 cpp_ggml 的 C API
-./deploy/server/serve.sh               # 127.0.0.1:8100, 2 实例, 空闲 300s 卸载
+./deploy/server/serve.sh               # 0.0.0.0:8110（本机 .env），2 实例, 空闲 300s 卸载
 ```
 
 `serve.sh` 可用的环境变量：`PORT` `HOST` `INSTANCES` `IDLE_UNLOAD_S` `PRECISION` `DEVICE`，
@@ -48,23 +48,29 @@ INSTANCES=1 IDLE_UNLOAD_S=300 ./deploy/server/serve.sh --preload
 # 对外监听 + 4 实例 + 详细日志
 HOST=0.0.0.0 PORT=8200 INSTANCES=4 ./deploy/server/serve.sh --log-level 0
 
-# 常用参数
-#   --gguf-dir D         模型目录（serve.sh 已指向 /data/www/models/VLX-Seek-1.5-10B-GGUF）
-#   --instances N        并发实例数，每实例约 9–11 GiB 显存 [2]
-#   --idle-unload-s F    空闲卸载秒数，0=不卸载 [300]
-#   --preload            启动即加载 + 预热
-#   --max-new-tokens N   生成长度上限（服务级，请求不能覆盖）[2048]
-#   --max-queue N        队列上限，满则 429 [64]
-#   --max-jobs N         内存保留任务数 [512]
-#   --job-ttl-s F        已完成任务保留秒数 [3600]
-#   --max-body-mb N      请求体上限 [32]
-#   --max-image-mb N     URL 下载图像上限 [16]
+# 常用参数（完整列表：./deploy/server/build/vlx-seek-server --help）
+#   --host H                 监听地址 [0.0.0.0]
+#   --port N                 监听端口 [8100；本机 .env 设为 8110]
+#   --device D               cuda|cpu|vulkan [cuda]
+#   --gpu N                  只用第 N 张 GPU（写入 CUDA_VISIBLE_DEVICES）
+#   --precision P            q8_0|f16 [q8_0]
+#   --instances N            并发实例数，每实例约 12 GiB 显存 [2]
+#   --idle-unload-s F        空闲卸载秒数，0=不卸载 [300]
+#   --preload                启动即加载 + 预热
+#   --tmp-dir D              临时文件目录 [<exe_dir>/tmp]
+#   --threads N              CPU 线程，0=自动 [0]
+#   --max-new-tokens N       生成长度上限（服务级，请求不能覆盖）[2048]
+#   --max-image-tokens N     图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]
+#   --max-image-mb N         URL 下载图像上限 [16]
 #   --image-url-timeout-s N  URL 下载超时秒 [10]
-#   --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy，本机地址不走代理）
-#   --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）
+#   --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）
+#   --api-key KEY            API key 认证，多个用逗号分隔（默认读 API_KEY）
 #   --openai-timeout-s N     /v1/chat/completions 同步等待上限 [300]
-#   --max-image-tokens N 图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]
-#   --log-level N        0=DEBUG 1=INFO 2=WARN 3=ERROR [1]
+#   --max-queue N            队列上限，满则 429 [64]
+#   --max-jobs N             内存保留任务数 [512]
+#   --job-ttl-s F            已完成任务保留秒数 [3600]
+#   --max-body-mb N          请求体上限 [32]
+#   --log-level N            0=DEBUG 1=INFO 2=WARN 3=ERROR [1]
 ```
 
 ## 3. 接口
@@ -257,20 +263,10 @@ print(resp.model_extra["vlx"]["result_bbox_list"])
 | `GET /healthz` | `model_loaded`、每 worker 的 `state/busy/load_ms/runs`、`queue_depth`。**不触发加载** |
 | `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e），含 `endpoints` 列表 |
 | `POST /v1/vlx/unload?wait=1&timeout_ms=30000` | 强制卸载；`wait=1` 等到 worker 真正释放 |
+| `GET /v1/vlx/jobs?limit=50&state=done` | 任务列表（新的在前） |
+| `DELETE /v1/vlx/jobs/{id}` | 取消排队中的任务（运行中返回 409） |
+| `GET /v1/vlx/jobs/{id}/png` | 下载带框的可视化 PNG（需提交时 `render_png=true`；未完成 409） |
 | `GET /metrics` | Prometheus 文本：队列深度、请求数、加载/卸载次数、token 累计、每 worker 状态（启用 API key 时需带凭证） |
-
-### 3.4 错误码
-
-| HTTP | 场景 |
-|---|---|
-| 400 | JSON 非法 / task 未知 / image 缺失或 base64 非法 / bbox 格式错 / 区域任务缺参数 / 传了 `max_new_tokens` 或 `temperature` |
-| 401 | 启用了 API key 但未带/带错凭证（`/healthz` 除外） |
-| 404 | job 不存在 |
-| 409 | 取消一个正在运行的任务 |
-| 429 | 队列已满（`--max-queue`） |
-| 500 | 内部错误（OpenAI 接口：任务失败也会转成 500 + OpenAI 错误体） |
-| 504 | OpenAI 接口同步等待超时（`--openai-timeout-s`） |
-| 任务内错误 | 任务 `state=failed`，`error` 字段给出原因（如 `model load failed: ...`、`image decode failed`） |
 
 ### 3.5 任务（task）详解
 
@@ -499,6 +495,19 @@ ls a_result.png
   框坐标在服务内部已映射回原图，PNG 与 `result_bbox_list` 完全一致，调用者不需要换算
 - 渲染样式与官方 `inference.py` 一致：红色 3 px 矩形 + 标签（非 ASCII 标签会退化成 `<objN>`）
 
+### 3.7 错误码
+
+| HTTP | 场景 |
+|---|---|
+| 400 | JSON 非法 / task 未知 / image 缺失或 base64 非法 / bbox 格式错 / 区域任务缺参数 / 传了 `max_new_tokens` 或 `temperature` |
+| 401 | 启用了 API key 但未带/带错凭证（`/healthz` 除外） |
+| 404 | job 不存在 |
+| 409 | 取消一个正在运行的任务 |
+| 429 | 队列已满（`--max-queue`） |
+| 500 | 内部错误（OpenAI 接口：任务失败也会转成 500 + OpenAI 错误体） |
+| 504 | OpenAI 接口同步等待超时（`--openai-timeout-s`） |
+| 任务内错误 | 任务 `state=failed`，`error` 字段给出原因（如 `model load failed: ...`、`image decode failed`） |
+
 ## 4. 模型生命周期（实测）
 
 | 场景 | 行为 | 实测 |
@@ -509,14 +518,14 @@ ls a_result.png
 | 空闲 ≥ `idle-unload-s` | 释放 ctx | 显存回到 **~470 MiB**（进程基础） |
 | 卸载后请求 | 自动重载 | e2e 2.9 s，`cold_start=true` |
 | `POST /v1/vlx/unload` | 立即（或等当前任务结束后）卸载 | `workers: [{unloaded: true}]` |
-| `--preload` | 启动即加载 + 预热 | 4.2 s（2 实例）/ 显存 22.2 GiB |
+| `--preload` | 启动即加载 + 预热 | 4.2 s（2 实例）/ 显存 22.6 GiB |
 
 ## 5. 并发与资源
 
 | 项 | 数值 |
 |---|---|
 | 单实例显存 | **11.7 GiB**（LLM q8_0 8.87 GiB + KV/compute buffer；C API 固定 `n_ctx=8192`） |
-| 2 实例 | **22.2 GiB**（进程内共享 CUDA context，增量约 10.5 GiB/实例） |
+| 2 实例 | **22.6 GiB**（进程内共享 CUDA context，增量约 11 GiB/实例） |
 | 峰值（2 实例推理中） | 22.96 GiB |
 | 48 GB 卡建议 | `--instances 2`（留 ~25 GB 余量）；4 实例约 33 GiB 也可，但注意与主机其它 CUDA 进程共存 |
 | 并发行为 | 每实例串行；多实例并行。队列 FIFO，超出 `--max-queue` 返回 429 |
@@ -664,7 +673,7 @@ ls a_result.png
 ## 9. 验收测试
 
 ```bash
-python3 deploy/server/test_server.py    # 29 项断言，自动起停服务
+python3 deploy/server/test_server.py    # 65 项断言，自动起停服务
 ```
 
 覆盖：冷启动不加载 → 首请求冷启动标记/加载耗时/结果框 → 不同尺寸连续请求（bug #3 回归）→
@@ -672,6 +681,8 @@ python3 deploy/server/test_server.py    # 29 项断言，自动起停服务
 2 实例并发（不同 worker）→ 取消排队任务 → /v1/vlx/info 统计 → URL 图像输入/404/协议校验 →
 2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图 →
 API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换 →
-OpenAI 兼容：/v1/models、chat.completion + usage + vlx 框、无图/temperature>0/stream 400、vqa 自由文本。
+OpenAI 兼容：/v1/models、chat.completion + usage + vlx 框、无图/temperature>0/stream 400、vqa 自由文本 →
+可视化：`render_png` 返回 base64、`GET /jobs/{id}/png` 下载（PNG 尺寸=原图）、未请求渲染时 400 →
+渐进式：detection 的框喂给 brief_region_caption 且 `load_ms=0`（模型常驻）。
 
-最近一次结果：`PASS 59 / FAIL 0`（含大图自动缩放、API key 认证、OpenAI 兼容接口；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
+最近一次结果：`PASS 65 / FAIL 0`（含大图自动缩放、API key 认证、OpenAI 兼容接口；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
