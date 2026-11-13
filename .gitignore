@@ -1,0 +1,10 @@
+# 构建/运行产物
+deploy/server/build/
+deploy/server/tmp/
+deploy/logs/
+deploy/out/
+deploy/test_images/*_result.png
+deploy/server/test-*.log
+
+# 本地配置（模板见 deploy/.env.example）
+deploy/.env

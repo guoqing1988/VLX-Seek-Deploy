@@ -1,0 +1,41 @@
+; VLX-Seek 1.5-10B 常驻推理服务（原生异步接口）
+;
+; 安装（用软链，不做复制，改本文件即生效，重启服务即可）：
+;   ./deploy/install-service.sh install
+;   # 等价于：sudo ln -sfn /data/www/VLX-Seek-GGML/deploy/vlx-seek.service \
+;   #            /etc/systemd/system/vlx-seek.service
+;
+; 环境变量：deploy/.env（EnvironmentFile）
+; 文档：deploy/SERVER.md
+
+[Unit]
+Description=VLX-Seek 1.5-10B inference service (native async API)
+Documentation=file:///data/www/VLX-Seek-GGML/deploy/SERVER.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=liu
+Group=liu
+WorkingDirectory=/data/www/VLX-Seek-GGML
+
+; KEY=value 形式；文件缺失时用脚本默认值（- 前缀表示可选）
+EnvironmentFile=-/data/www/VLX-Seek-GGML/deploy/.env
+ExecStart=/data/www/VLX-Seek-GGML/deploy/server/serve.sh
+
+; 异常退出重启；正常停止（SIGTERM）时释放模型后退出
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+; 日志进 journald：journalctl -u vlx-seek -f
+SyslogIdentifier=vlx-seek
+StandardOutput=journal
+StandardError=journal
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
