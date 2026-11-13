@@ -59,7 +59,10 @@
   .card .body{display:grid;grid-template-columns:minmax(260px,42%) 1fr;gap:14px;padding:14px}
   @media(max-width:760px){.card .body{grid-template-columns:1fr}}
   .card img.viz{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
-  .hist{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card)}
+  .hist{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card);margin-bottom:14px}
+  .hist .results{display:grid;gap:12px}
+  .noviz{display:flex;align-items:center;justify-content:center;min-height:160px;color:var(--muted);
+         font-size:12px;border:1px dashed var(--line);border-radius:8px;background:var(--panel2)}
   .hist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
   .hist-head h2{font-size:14px;margin:0}
   .hist-item{padding:7px 0;border-top:1px solid var(--line);cursor:pointer}
@@ -126,7 +129,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.9</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.10</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -216,7 +219,7 @@
           <h2>运行记录 <span class="hint" id="histCount"></span></h2>
           <button class="ghost" id="histClear" style="padding:4px 10px;font-size:12px">清空</button>
         </div>
-        <div id="histList"></div>
+        <div class="results" id="histList"></div>
       </div>
       <div class="results" id="results">
         <div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>
@@ -230,7 +233,7 @@ const $ = (s) => document.querySelector(s);
 
 // ---------- 运行记录（localStorage）----------
 const HIST_KEY = 'vlx_seek_hist_v1';
-const HIST_MAX = 30;
+const HIST_MAX = 20;
 function histLoad() {
   try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch { return []; }
 }
@@ -247,39 +250,35 @@ function esc2(v) {
   return String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 function histRender() {
-  const list = histLoad();
+  const list = histLoad().filter((r) => r.job);
   const card = $('#histCard');
   if (!card) return;
   card.style.display = list.length ? '' : 'none';
-  $('#histCount').textContent = list.length ? `最近 ${list.length} 条（存在浏览器本地）` : '';
-  $('#histList').innerHTML = list.map((r) => {
+  $('#histCount').textContent = list.length ? `最近 ${list.length} 条（存在浏览器本地，刷新不丢）` : '';
+  const box = $('#histList');
+  box.innerHTML = '';
+  const p2 = (n) => String(n).padStart(2, '0');
+  list.forEach((r) => {
     const ts = new Date(r.ts);
-    const p2 = (n) => String(n).padStart(2, '0');
     const time = `${p2(ts.getMonth() + 1)}-${p2(ts.getDate())} ${p2(ts.getHours())}:${p2(ts.getMinutes())}:${p2(ts.getSeconds())}`;
     const ok = r.state === 'done';
-    return `<div class="hist-item" data-id="${esc2(r.id)}">
-      <div class="h1">
-        <span class="tag ${ok ? '' : 'err'}">${ok ? '成功' : '失败'}</span>
-        <b>${esc2(r.task)}</b>
-        <span>${time}</span>
-        <span>总耗时 ${(r.wallMs / 1000).toFixed(2)} s</span>
-        <span>服务端 ${Math.round(r.e2e || 0)} ms</span>
-        <span>${r.boxes ? r.boxes + ' 框' : '无框'}</span>
-        <span class="hsum">${esc2((r.answer || '').slice(0, 80))}</span>
-      </div>
-      <div class="hbody">${esc2([
-        `task ${r.task} · lang ${r.lang} · bbox ${r.nBoxes ?? 0}` + (r.text ? ` · text ${r.text}` : '') +
-        ((r.targets && r.targets.length) ? ` · targets [${r.targets.join(',')}]` : ''),
-        `图片 ${r.imageBytes ? (r.imageBytes / 1024 / 1024).toFixed(2) + ' MB' : '–'} · 总耗时 ${(r.wallMs / 1000).toFixed(2)} s · 服务端 e2e ${Math.round(r.e2e || 0)} ms`,
-        `预处理 ${Math.round(r.preprocess || 0)} ms · 推理 ${Math.round(r.inference || 0)} ms · 解码 ${Math.round(r.decode || 0)} ms` +
-        (r.decodeTps ? ` (${r.decodeTps.toFixed(1)} tok/s)` : '') + ` · tokens ${r.tokens ?? '?'}`,
-        '—'.repeat(20),
-        r.answer || '(空)',
-      ].join('\n'))}</div>
-    </div>`;
-  }).join('');
-  $('#histList').querySelectorAll('.hist-item').forEach((el) => {
-    el.onclick = () => el.classList.toggle('open');
+    const el = cardFor(`${r.task || 'job'} · ${time}`);
+    el.dataset.histId = r.id;
+    paintResult(el, r.job, r.wallMs);
+    const im = el.querySelector('.viz');
+    const ph = el.querySelector('.vizph');
+    if (r.thumb) {
+      if (ph) ph.remove();
+      im.src = r.thumb;
+      im.style.display = '';
+    } else if (ph) {
+      ph.outerHTML = '<div class="noviz">带框图未保存</div>';
+    }
+    if (!ok) {
+      el.querySelector('.state').textContent = r.state === 'timeout' ? 'timeout' : 'failed';
+      el.querySelector('.state').className = 'state failed';
+    }
+    box.appendChild(el);
   });
 }
 $('#histClear').onclick = () => {
@@ -615,7 +614,7 @@ function prettyAnswer(a) {
                .replace(/&lt;\/think&gt;/g, '<span class="mark">&lt;/think&gt;</span>');
 }
 
-async function renderJob(el, job, wallMs) {
+function paintResult(el, job, wallMs) {
   finishCard(el);
   const ph = el.querySelector('.vizph'); if (ph) ph.remove();
   const res = job.result || {};
@@ -668,36 +667,58 @@ async function renderJob(el, job, wallMs) {
     el.querySelector('.boxes').textContent = '无框（VQA 或未匹配）';
   }
 
-  // 图片最后异步取：不阻塞 answer / 参数 / 框列表的渲染
-  loadViz(el, job);
-
-  // 写入本地运行记录
-  histPush({
-    id: job.job_id, ts: Date.now(), state: job.state,
-    task: rq.task, lang: rq.lang, text: rq.text, nBoxes: rq.n_boxes,
-    targets: rq.target_region_indexes || [], imageBytes: rq.image_bytes,
-    renderPng: !!rq.render_png, wallMs,
-    e2e: t.e2e_ms, preprocess: t.preprocess_ms, inference: t.inference_ms,
-    decode: t.decode_ms, decodeTps: (t.decode_ms > 0 && res.completion_tokens) ? res.completion_tokens / (t.decode_ms / 1000) : 0,
-    tokens: res.completion_tokens, boxes: boxes.length, answer: res.answer || '',
-  });
 }
 
-// 异步加载带框图（失败不影响文本结果）
+// 结果渲染完成后：异步取图 + 写本地运行记录（先写文本，图到了再补缩略图）
+async function renderJob(el, job, wallMs) {
+  paintResult(el, job, wallMs);
+  const rec = () => ({
+    id: job.job_id, ts: Date.now(), state: job.state, wallMs,
+    task: (job.request || {}).task, answer: (job.result || {}).answer || '',
+    job: slimJob(job), thumb: '',
+  });
+  histPush(rec());
+  const thumb = await loadViz(el, job);
+  if (thumb) histPush({ ...rec(), thumb });
+}
+
+// 只保留渲染需要的字段，避免 localStorage 存入无用数据
+function slimJob(job) {
+  return {
+    job_id: job.job_id, state: job.state, request: job.request, result: job.result,
+    timings_ms: job.timings_ms, image: job.image, cold_start: job.cold_start,
+    created_at_ms: job.created_at_ms, started_at_ms: job.started_at_ms, finished_at_ms: job.finished_at_ms,
+  };
+}
+
+// 异步加载带框图（失败不影响文本结果），返回缩略图 dataURL 供记录持久化
 async function loadViz(el, job) {
-  if (!(job.has_png && job.png_url)) return;
+  if (!(job.has_png && job.png_url)) return '';
   try {
     const r = await fetch(job.png_url + (job.png_url.includes('?') ? '&' : '?') + 'format=jpeg&q=88',
                           { headers: { Authorization: 'Bearer ' + state.key } });
-    if (!r.ok) return;
+    if (!r.ok) return '';
     const blob = await r.blob();
     const im = el.querySelector('.viz');
-    if (!im) return;
-    im.src = URL.createObjectURL(blob);
-    im.style.display = '';
+    if (im) { im.src = URL.createObjectURL(blob); im.style.display = ''; }
+    return await makeThumb(blob);
   } catch (e) {
     console.warn('viz load failed', e);
+    return '';
   }
+}
+
+// 生成缩略图（最长边 480，JPEG q0.6），用于刷新后还原运行记录
+async function makeThumb(blob, maxSide = 480) {
+  try {
+    const bmp = await createImageBitmap(blob);
+    const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k);
+    c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.6);
+  } catch { return ''; }
 }
 
 // ---------- 运行 ----------
