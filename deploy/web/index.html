@@ -59,8 +59,7 @@
   .card .body{display:grid;grid-template-columns:minmax(260px,42%) 1fr;gap:14px;padding:14px}
   @media(max-width:760px){.card .body{grid-template-columns:1fr}}
   .card img.viz{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
-  .hist{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card);margin-bottom:14px}
-  .hist .results{display:grid;gap:12px}
+  .results-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}
   .noviz{display:flex;align-items:center;justify-content:center;min-height:160px;color:var(--muted);
          font-size:12px;border:1px dashed var(--line);border-radius:8px;background:var(--panel2)}
   .hist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
@@ -129,7 +128,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.10</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.11</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -214,12 +213,9 @@
         </div>
         <details style="margin-top:8px"><summary>原始配置</summary><pre class="answer" id="infoRaw" style="margin-top:8px"></pre></details>
       </div>
-      <div class="hist" id="histCard" style="display:none;margin-bottom:14px">
-        <div class="hist-head">
-          <h2>运行记录 <span class="hint" id="histCount"></span></h2>
-          <button class="ghost" id="histClear" style="padding:4px 10px;font-size:12px">清空</button>
-        </div>
-        <div class="results" id="histList"></div>
+      <div class="results-head">
+        <span class="hint" id="histCount">运行记录</span>
+        <button class="ghost" id="histClear" style="padding:3px 10px;font-size:12px;display:none">清空记录</button>
       </div>
       <div class="results" id="results">
         <div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>
@@ -244,19 +240,17 @@ function histPush(rec) {
   const list = histLoad().filter((x) => x.id !== rec.id);   // 同 job 只留一条
   list.unshift(rec);
   histSave(list);
-  histRender();
+  histCountUpdate();
 }
 function esc2(v) {
   return String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 function histRender() {
   const list = histLoad().filter((r) => r.job);
-  const card = $('#histCard');
-  if (!card) return;
-  card.style.display = list.length ? '' : 'none';
-  $('#histCount').textContent = list.length ? `最近 ${list.length} 条（存在浏览器本地，刷新不丢）` : '';
-  const box = $('#histList');
-  box.innerHTML = '';
+  const box = $('#results');
+  if (!box) return;
+  const empty = box.querySelector('.empty');
+  if (empty) empty.remove();
   const p2 = (n) => String(n).padStart(2, '0');
   list.forEach((r) => {
     const ts = new Date(r.ts);
@@ -280,11 +274,23 @@ function histRender() {
     }
     box.appendChild(el);
   });
+  histCountUpdate();
+}
+
+function histCountUpdate() {
+  const n = histLoad().filter((r) => r.job).length;
+  $('#histCount').textContent = n ? `运行记录 ${n} 条（本地保存，刷新不丢）` : '运行记录';
+  $('#histClear').style.display = n ? '' : 'none';
 }
 $('#histClear').onclick = () => {
   if (!confirm('清空本地运行记录？')) return;
   histSave([]);
-  histRender();
+  const box = $('#results');
+  box.querySelectorAll('.card').forEach((el) => el.remove());
+  if (!box.querySelector('.empty')) {
+    box.insertAdjacentHTML('beforeend', '<div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>');
+  }
+  histCountUpdate();
 };
 histRender();   // 页面加载时显示历史记录
 const state = { key: sessionStorage.getItem('vlx_api_key') || '', files: [], info: null, running: 0 };
