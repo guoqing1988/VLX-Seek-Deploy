@@ -38,6 +38,8 @@
 #include <nlohmann/json.hpp>
 
 #include "vlx/vlx_seek_capi.h"
+#include "stb_image_write.h"
+#include "vlx_pipeline_common.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -336,6 +338,9 @@ class VlxServer {
     void handle_openai_models(const httplib::Request& req, httplib::Response& res);
     void handle_job_get(const httplib::Request& req, httplib::Response& res);
     void handle_job_png(const httplib::Request& req, httplib::Response& res);
+    // 在原图尺寸上渲染结果（框坐标与 result_bbox_list 完全一致，调用者无需换算）
+    bool render_result_png(const std::string& image_path, const json& result,
+                          const std::string& out_path) const;
     void handle_job_list(const httplib::Request& req, httplib::Response& res);
     void handle_job_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_health(const httplib::Request& req, httplib::Response& res);
@@ -453,6 +458,31 @@ int VlxServer::run() {
 // ============================================================================
 // worker
 // ============================================================================
+// 可视化：始终画在**原图**上。result 里的框已经是原图坐标（缩放已映射回来），
+// 所以 PNG 尺寸 == 原图尺寸，坐标与 result_bbox_list 一致，调用者不需要换算。
+// 绘制函数复用官方实现（vlx::draw_rect_pil / draw_label_pil），风格与 inference.py 一致。
+bool VlxServer::render_result_png(const std::string& image_path, const json& result,
+                                  const std::string& out_path) const {
+    if (!result.is_object() || !result.contains("result_bbox_list")) return false;
+    uint8_t* rgb = nullptr;
+    int32_t w = 0, h = 0;
+    if (vlx_seek_load_path_rgb(image_path.c_str(), &rgb, &w, &h) != 0 || !rgb) return false;
+    std::vector<uint8_t> canvas(rgb, rgb + size_t(w) * size_t(h) * 3);
+    vlx_seek_free_buffer(rgb);
+    for (const auto& b : result["result_bbox_list"]) {
+        if (!b.is_object()) continue;
+        const double x0 = b.value("xmin", 0.0), y0 = b.value("ymin", 0.0);
+        const double x1 = b.value("xmax", 0.0), y1 = b.value("ymax", 0.0);
+        const std::string label = b.value("label", "");
+        const std::string index = b.value("object_index", "");
+        vlx::draw_rect_pil(&canvas, w, h, x0, y0, x1, y1, 3);
+        const std::string text =
+            label.empty() ? index : (vlx::all_ascii(label) ? label : index);
+        if (!text.empty()) vlx::draw_label_pil(&canvas, w, h, x0, y0, text);
+    }
+    return stbi_write_png(out_path.c_str(), w, h, 3, canvas.data(), w * 3) != 0;
+}
+
 vlx_seek_ctx* VlxServer::load_ctx(std::string* err) {
     vlx_seek_options* o = vlx_seek_options_new();
     vlx_seek_options_set_device(o, opts_.device.c_str());
@@ -711,7 +741,7 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
         if (job->render_png && err.empty()) {
             TempFile png_tmp;
             png_tmp.path = opts_.tmp_dir + "/" + job->id + ".png";
-            if (vlx_seek_result_render_png(w.ctx, &view, png_tmp.path.c_str()) == 0) {
+            if (render_result_png(job->image_path, res_json, png_tmp.path)) {
                 std::ifstream in(png_tmp.path, std::ios::binary);
                 std::string raw((std::istreambuf_iterator<char>(in)),
                                 std::istreambuf_iterator<char>());

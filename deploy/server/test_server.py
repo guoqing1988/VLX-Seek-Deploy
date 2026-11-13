@@ -298,7 +298,7 @@ def phase_d() -> None:
     svc = Service(port=8114, instances=1, idle_s=0, tag="d")
     try:
         check(svc.wait_ready(), "服务启动")
-        code, r = svc.submit(image_path=big)
+        code, r = svc.submit(image_path=big, render_png=True)
         job = svc.wait_job(r["job_id"], timeout=300)
         img = job.get("image") or {}
         boxes = (job.get("result") or {}).get("result_bbox_list") or []
@@ -312,6 +312,15 @@ def phase_d() -> None:
             max_x = max(b["xmax"] for b in boxes)
             check(max_x > 1300, "框坐标映射回原图坐标系", f"max_x={max_x:.0f}")
         check(len(boxes) >= 3, "缩放后仍检出目标", f"{len(boxes)} boxes")
+        # 可视化必须在原图尺寸上：PNG 尺寸 == 原图，坐标无需换算
+        req = urllib.request.Request(f"{svc.base}/v1/vlx/jobs/{job['job_id']}/png")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            png = resp.read()
+        tmp_png = TMP / "big_result.png"
+        tmp_png.write_bytes(png)
+        im = Image.open(tmp_png)
+        check(im.size == (2560, 1920), "缩放任务的 PNG 仍是原图尺寸", f"{im.size}")
+        tmp_png.unlink(missing_ok=True)
     finally:
         svc.stop()
         big.unlink(missing_ok=True)

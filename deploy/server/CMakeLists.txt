@@ -30,6 +30,8 @@ add_executable(vlx-seek-server
 
 target_include_directories(vlx-seek-server PRIVATE
     "${VLX_ROOT}/cpp_ggml/include"
+    "${VLX_ROOT}/cpp_ggml/src"
+    "${VLX_ROOT}/cpp_ggml/third_party/stb"
     "${HTTPLIB_DIR}"
     "${NLOHMANN_DIR}"
 )

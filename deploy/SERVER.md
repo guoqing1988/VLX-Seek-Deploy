@@ -495,7 +495,8 @@ ls a_result.png
 ```
 
 - `GET /v1/vlx/jobs/{id}/png`：任务未完成 409；没请求 `render_png` 时 400 并提示；PNG 在 job 保留期内（`--job-ttl-s`，默认 1 h）可重复下载
-- PNG 是**处理后的尺寸**（发生缩放时等于 `image.width × height`），而 `result_bbox_list` 是**原图坐标**；要在原图上标注请按 `image.scale` 换算
+- PNG **始终按原图尺寸渲染**（`image.original_width × original_height`）：缩放只影响送进模型的分辨率，
+  框坐标在服务内部已映射回原图，PNG 与 `result_bbox_list` 完全一致，调用者不需要换算
 - 渲染样式与官方 `inference.py` 一致：红色 3 px 矩形 + 标签（非 ASCII 标签会退化成 `<objN>`）
 
 ## 4. 模型生命周期（实测）
@@ -543,8 +544,8 @@ ls a_result.png
    上游 runtime 的图缓存按首次输入 shape 分配，复用不同尺寸会越界崩溃（见 §8）。
    生产建议固定分辨率，或按尺寸分桶部署。
 6. 每个任务在内存里保留结果（默认 1 小时 / 512 条），`render_png=true` 时结果含 PNG base64。
-7. `render_png=true` 且触发了缩放时，PNG 是**处理后的尺寸**（`image.width × image.height`），
-   而 `result_bbox_list` 是**原图坐标**；要在原图上标注请按 `image.scale` 换算（或直接用 `result_bbox_list`）。
+7. `render_png=true` 的可视化 PNG **始终按原图尺寸渲染**（缩放只影响推理，坐标已在服务内部映射回原图），
+   所以 PNG 尺寸 = `image.original_width × original_height`，框位置与 `result_bbox_list` 一致，调用者不需要任何换算。
 
 ## 6.1 分辨率上限：超限自动缩放
 

@@ -86,7 +86,7 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
 ./deploy/server/serve.sh --preload       # 默认 0.0.0.0:8110，2 实例，空闲 300s 卸载
-sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 64 项验收（先让出显存）
+sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 65 项验收（先让出显存）
 ```
 
 服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。
@@ -145,7 +145,8 @@ POST /v1/vlx/infer
   对该框做 `region_ocr` / `brief_region_caption`。实测第二步 1.24 s、`load_ms=0`（模型常驻）。
 - **下载带框图**：提交时 `render_png: true`，然后
   `curl -s -o result.png localhost:8110/v1/vlx/jobs/<job_id>/png`；
-  或 CLI 默认写 `<image>_result.png`。PNG 是处理后的尺寸，框坐标是原图坐标（按 `image.scale` 换算）。
+  或 CLI 默认写 `<image>_result.png`。PNG **始终按原图尺寸渲染**，框位置与 `result_bbox_list` 一致，
+  内部缩放对调用者完全透明（无需换算）。
 
 详见 [`deploy/SERVER.md` §3.6](deploy/SERVER.md)。
 
