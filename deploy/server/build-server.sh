@@ -10,7 +10,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/../env.sh"
 
-BUILD_DIR="$HERE/build"
+# 可用 VLX_SERVER_BUILD_DIR 指定独立构建目录（例如并行保留 12.8 / 13.0 两套）
+BUILD_DIR="${VLX_SERVER_BUILD_DIR:-$HERE/build}"
 LOG_DIR="$HERE/../logs"
 LOG="$LOG_DIR/build-server-$(date +%Y%m%d-%H%M%S).log"
 mkdir -p "$LOG_DIR"
@@ -25,6 +26,8 @@ echo "== 配置 ($BUILD_DIR, CUDA arch=$VLX_CUDA_ARCH) ==" | tee -a "$LOG"
 cmake -S "$HERE" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DVLX_GGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+    -DCUDAToolkit_ROOT="$CUDA_HOME" \
     -DCMAKE_CUDA_ARCHITECTURES="$VLX_CUDA_ARCH" \
     2>&1 | tee -a "$LOG"
 

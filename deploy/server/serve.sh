@@ -12,7 +12,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../env.sh"
 
-BIN="$HERE/build/vlx-seek-server"
+# 可用 VLX_SERVER_BIN 指向另一套构建（例如并行验证 CUDA 13.0）
+BIN="${VLX_SERVER_BIN:-$HERE/build/vlx-seek-server}"
 # 多卡选择：GPU=1 表示只用物理卡 1（等价于 CUDA_VISIBLE_DEVICES=1）
 [ -n "${GPU:-}" ] && export CUDA_VISIBLE_DEVICES="$GPU"
 [ -x "$BIN" ] || { echo "服务未构建：先运行 deploy/server/build-server.sh" >&2; exit 1; }
