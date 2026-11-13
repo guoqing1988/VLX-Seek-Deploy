@@ -83,10 +83,9 @@
 <div id="login">
   <div class="card">
     <h1>VLX-Seek 1.5-10B 控制台</h1>
-    <p>输入访问密码（即 <code>deploy/.env</code> 里的 <code>API_KEY</code>）</p>
     <div class="field">
-      <label for="key">API key</label>
-      <input id="key" type="password" placeholder="vlx_..." autocomplete="current-password">
+      <label for="key">密码</label>
+      <input id="key" type="password" placeholder="请输入密码" autocomplete="current-password">
     </div>
     <div class="err" id="loginErr"></div>
     <button id="loginBtn" style="width:100%">进入</button>
@@ -210,7 +209,7 @@ async function api(path, opts = {}) {
 // ---------- 登录 ----------
 async function login(key) {
   $('#loginErr').textContent = '';
-  if (!key.trim()) { $('#loginErr').textContent = '请输入 API key'; return; }
+  if (!key.trim()) { $('#loginErr').textContent = '请输入密码'; return; }
   $('#loginBtn').disabled = true;
   try {
     const r = await fetch('/v1/vlx/info', { headers: { Authorization: 'Bearer ' + key.trim() } });
