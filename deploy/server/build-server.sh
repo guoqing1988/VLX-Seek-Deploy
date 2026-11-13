@@ -23,6 +23,22 @@ command -v cmake >/dev/null || die "cmake 未安装"
     || die "llama.cpp 子模块缺失: git submodule update --init --recursive"
 
 # 应用 deploy/patches/*.patch 到上游源码（幂等：已应用则跳过；不适用则退出）
+APPLIED_PATCHES=()
+# 构建结束（含失败）时把 patch 还原，保持上游源码干净
+cleanup_patches() {
+    local rc=$?
+    local p
+    for p in "${APPLIED_PATCHES[@]}"; do
+        if git -C "$PROJECT_ROOT" apply --reverse "$p" 2>/dev/null; then
+            echo "== 已还原 patch: $(basename "$p") ==" | tee -a "$LOG"
+        else
+            echo "WARN: 还原 patch 失败（源码被改动过？）: $p" | tee -a "$LOG"
+        fi
+    done
+    return $rc
+}
+trap cleanup_patches EXIT
+
 apply_vlx_patches() {
     local pdir="$HERE/../patches"
     [ -d "$pdir" ] || return 0
@@ -33,7 +49,8 @@ apply_vlx_patches() {
             echo "== patch 已应用: $(basename "$p") ==" | tee -a "$LOG"
         elif git -C "$PROJECT_ROOT" apply --check "$p" 2>/dev/null; then
             git -C "$PROJECT_ROOT" apply "$p" || die "应用 patch 失败: $p"
-            echo "== 已应用 patch: $(basename "$p") ==" | tee -a "$LOG"
+            APPLIED_PATCHES+=("$p")
+            echo "== 已应用 patch: $(basename "$p")（构建后自动还原）==" | tee -a "$LOG"
         else
             die "patch 不适用于当前源码（上游更新了？请重新生成）: $p"
         fi

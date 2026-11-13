@@ -65,8 +65,8 @@ deploy/patches/0001-capi-ctx-reuse-fixes.patch
 
 - 已应用 → `git apply --reverse --check` 通过，跳过
 - 未应用 → `git apply --check` 通过则应用，否则**退出并提示重新生成 patch**
-- 因此 `cpp_ggml` 的 `git status` 显示这 5 个文件 dirty 是**预期状态**
-  （与项目自带的 `cpp_ggml/third_party/llama-patches/` 机制一致）
+- 构建结束（含失败，`trap EXIT`）会**自动还原 patch**，所以上游源码保持干净；
+  下一次构建会再次应用（幂等）
 
 重新 clone 上游 + 部署仓库后，直接 `./deploy/server/build-server.sh` 即可，无需手工改源码。
 
