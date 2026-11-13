@@ -111,7 +111,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.5</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.6</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -537,22 +537,6 @@ async function renderJob(el, job, wallMs) {
   const img = job.image || {};
   el.querySelector('.answer').innerHTML = prettyAnswer(res.answer || '(空)');
 
-  // 带框图（需要请求时 render_png=true）
-  if (job.has_png && job.png_url) {
-    try {
-      const r = await fetch(job.png_url + (job.png_url.includes('?') ? '&' : '?') + 'format=jpeg&q=88',
-                            { headers: { Authorization: 'Bearer ' + state.key } });
-      if (r.ok) {
-        const blob = await r.blob();
-        const im = el.querySelector('.viz');
-        im.src = URL.createObjectURL(blob);
-        im.style.display = '';
-      } else if (r.status === 400) {
-        // 未请求 render_png，无图可显示
-      }
-    } catch {}
-  }
-
   const waitMs = (job.started_at_ms && job.created_at_ms) ? job.started_at_ms - job.created_at_ms : 0;
   const runMs = (job.finished_at_ms && job.started_at_ms) ? job.finished_at_ms - job.started_at_ms : 0;
   const decodeMs = t.decode_ms || 0;
@@ -581,6 +565,26 @@ async function renderJob(el, job, wallMs) {
       `<table><thead><tr><th>索引</th><th>标签</th><th>左上</th><th>右下</th></tr></thead><tbody>${rows}</tbody></table>`;
   } else {
     el.querySelector('.boxes').textContent = '无框（VQA 或未匹配）';
+  }
+
+  // 图片最后异步取：不阻塞 answer / 参数 / 框列表的渲染
+  loadViz(el, job);
+}
+
+// 异步加载带框图（失败不影响文本结果）
+async function loadViz(el, job) {
+  if (!(job.has_png && job.png_url)) return;
+  try {
+    const r = await fetch(job.png_url + (job.png_url.includes('?') ? '&' : '?') + 'format=jpeg&q=88',
+                          { headers: { Authorization: 'Bearer ' + state.key } });
+    if (!r.ok) return;
+    const blob = await r.blob();
+    const im = el.querySelector('.viz');
+    if (!im) return;
+    im.src = URL.createObjectURL(blob);
+    im.style.display = '';
+  } catch (e) {
+    console.warn('viz load failed', e);
   }
 }
 
