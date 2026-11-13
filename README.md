@@ -34,6 +34,8 @@ deploy/
 ├── vlx-seek.service        # systemd unit（软链安装）
 ├── install-service.sh      # systemd 安装/卸载/状态/重启
 ├── test_images/            # 自测图片（9 张）
+├── web/index.html          # 单文件 Web 控制台（上传图片 / 7 个任务 / 看带框图）
+├── nginx/                  # nginx 配置 :8188（静态页面 + API 反代）与软链脚本
 └── server/
     ├── CMakeLists.txt      # 独立工程，链接上游 C API + vendor cpp-httplib
     ├── vlx_seek_server.cpp # 服务主程序（异步队列 + 多实例 + 生命周期管理）
@@ -238,6 +240,18 @@ curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
 
 实测：常规目标（几十像素以上）缩放**无召回损失**；只有目标 < 16 px 时才需要
 `--max-image-tokens 2000~3800`（代价是 1.9–5.3 s、16.6–19.1 GiB/实例）。详见 `deploy/SERVER.md` §6.1。
+
+## Web 控制台（nginx :8188）
+
+```bash
+./deploy/nginx/install-nginx.sh install     # 软链到 /etc/nginx/conf.d + nginx -t + reload
+# 访问 http://<本机IP>:8188/ ，密码 = deploy/.env 里的 API_KEY
+```
+
+- 单文件页面 `deploy/web/index.html`：拖拽上传（可多图）、7 个任务、bbox/区域索引、
+  展示 answer / 框表 / 耗时 / **带框图**
+- nginx 只做静态页面 + `/v1/`、`/healthz`、`/metrics` 反代，鉴权仍由服务的 API key 完成
+- 配置 `deploy/nginx/vlx-seek.conf`（`client_max_body_size 32m`，反代超时 300 s）
 
 ## systemd 托管
 

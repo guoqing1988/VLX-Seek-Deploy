@@ -495,7 +495,49 @@ ls a_result.png
   框坐标在服务内部已映射回原图，PNG 与 `result_bbox_list` 完全一致，调用者不需要换算
 - 渲染样式与官方 `inference.py` 一致：红色 3 px 矩形 + 标签（非 ASCII 标签会退化成 `<objN>`）
 
-### 3.7 错误码
+### 3.7 Web 控制台（nginx :8188）
+
+`deploy/web/index.html` 是一个单文件控制台，通过 nginx 反向代理到服务：
+
+```
+浏览器 :8188 ──► nginx ──┬─ /            → deploy/web/index.html（静态页面）
+                         └─ /v1/、/healthz、/metrics → 127.0.0.1:8110
+```
+
+安装（软链，不复制配置）：
+
+```bash
+./deploy/nginx/install-nginx.sh install     # sudo ln -sfn + nginx -t + reload
+./deploy/nginx/install-nginx.sh status
+./deploy/nginx/install-nginx.sh uninstall
+```
+
+- 访问：`http://<本机IP>:8188/`
+- **密码 = `deploy/.env` 里的 `API_KEY`**：页面把输入的 key 存进 `sessionStorage`，
+  用 `GET /v1/vlx/info`（带 `Authorization: Bearer`）校验，实际把关的是服务端 API key 认证
+- key 不写进 nginx 配置；轮换/停用只改 `.env` 并重启服务，页面重新登录即可
+- nginx 配置：`deploy/nginx/vlx-seek.conf`（软链到 `/etc/nginx/conf.d/vlx-seek.conf`）
+
+页面功能：
+
+| 功能 | 说明 |
+|---|---|
+| 状态条 | `/healthz`：模型是否加载、实例数、队列深度（不需要 key） |
+| 服务信息 | `/v1/vlx/info`：精度、实例数、认证状态、图像预算、成功/失败计数 |
+| 多图上传 | 拖拽或选择，多张会逐个提交（服务端 2 实例并行） |
+| 图片 URL | 每行一个 http(s) 地址 |
+| 7 个任务 | 下拉选择，text 提示随任务变化；区域任务要求填 `target_region_indexes` |
+| 高级参数 | `bbox_list`、`target_region_indexes`、是否返回带框图 |
+| 结果展示 | `answer`（`<ground>/<objects>/<think>` 高亮）、框表格、耗时/tokens/冷启动/处理尺寸、**带框图** |
+
+限制与注意：
+
+- `client_max_body_size 32m`（与服务 `--max-body-mb` 一致），base64 大图不要超过
+- 反代超时 300 s，匹配 `--openai-timeout-s`（同步 OpenAI 接口）
+- 多图时不支持共用一组 `bbox_list`（页面会拦），单图提交即可
+- nginx 监听 `8188`（所有网卡）：对外暴露前请配防火墙/安全组
+
+### 3.8 错误码
 
 | HTTP | 场景 |
 |---|---|

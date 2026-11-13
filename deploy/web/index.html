@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VLX-Seek 1.5-10B 控制台</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--panel2:#1e222b;--line:#2a2f3a;--fg:#e6e9ef;--muted:#9aa4b2;--accent:#4f8cff;--ok:#3fb950;--warn:#d29922;--err:#f85149}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif}
+  a{color:var(--accent)}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  /* 登录 */
+  #login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 30% 20%,#1b2432,#0f1115 60%)}
+  #login .card{width:min(420px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px}
+  #login h1{margin:0 0 6px;font-size:20px}
+  #login p{margin:0 0 18px;color:var(--muted);font-size:13px}
+  .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+  .field label{font-size:12px;color:var(--muted)}
+  input,textarea,select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:9px 11px;font:inherit;width:100%}
+  textarea{resize:vertical;min-height:64px}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+  .err{color:var(--err);font-size:13px;min-height:18px}
+  /* 主界面 */
+  header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+  header .title{font-weight:600}
+  header .spacer{flex:1}
+  .pill{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .pill.on{color:var(--ok);border-color:#1f4d2b}
+  .pill.off{color:var(--muted)}
+  main{display:grid;grid-template-columns:360px 1fr;gap:18px;padding:18px;align-items:start}
+  @media(max-width:980px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .panel h2{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+  .row{display:flex;gap:10px}
+  .row>*{flex:1}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  #drop{border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--muted);cursor:pointer}
+  #drop.drag{border-color:var(--accent);color:var(--fg);background:#16203a}
+  #thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  #thumbs figure{margin:0;position:relative}
+  #thumbs img{width:74px;height:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line)}
+  #thumbs button{position:absolute;top:-6px;right:-6px;padding:0;width:18px;height:18px;border-radius:50%;font-size:12px;line-height:1}
+  .results{display:grid;gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .card .head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .card .head .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card .head .spacer{flex:1}
+  .state{font-size:12px;padding:2px 8px;border-radius:999px}
+  .state.queued{color:var(--muted);border:1px solid var(--line)}
+  .state.running{color:var(--warn);border:1px solid #4a3a12}
+  .state.done{color:var(--ok);border:1px solid #1f4d2b}
+  .state.failed{color:var(--err);border:1px solid #5a1f1f}
+  .card .body{display:grid;grid-template-columns:minmax(260px,42%) 1fr;gap:14px;padding:14px}
+  @media(max-width:760px){.card .body{grid-template-columns:1fr}}
+  .card img.viz{width:100%;border-radius:8px;border:1px solid var(--line);background:#000}
+  .meta{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}
+  .meta b{color:var(--fg);font-weight:600}
+  pre.answer{white-space:pre-wrap;word-break:break-word;background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px;margin:0;max-height:220px;overflow:auto;font-size:13px}
+  .mark{color:#7ee787}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600}
+  .empty{color:var(--muted);padding:24px;text-align:center;border:1px dashed var(--line);border-radius:12px}
+  .kbd{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11px}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="card">
+    <h1>VLX-Seek 1.5-10B 控制台</h1>
+    <p>输入访问密码（即 <code>deploy/.env</code> 里的 <code>API_KEY</code>）</p>
+    <div class="field">
+      <label for="key">API key</label>
+      <input id="key" type="password" placeholder="vlx_..." autocomplete="current-password">
+    </div>
+    <div class="err" id="loginErr"></div>
+    <button id="loginBtn" style="width:100%">进入</button>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <span class="title">VLX-Seek 1.5-10B</span>
+    <span class="pill" id="pHealth">状态…</span>
+    <span class="pill" id="pQueue">队列 –</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="refreshBtn">刷新状态</button>
+    <button class="ghost" id="logoutBtn">退出</button>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>输入</h2>
+      <div id="drop">
+        拖拽图片到这里，或点击选择（可多选）
+        <input id="file" type="file" accept="image/*" multiple hidden>
+      </div>
+      <div id="thumbs"></div>
+      <div class="field" style="margin-top:12px">
+        <label>或：图片 URL（每行一个，支持 http/https）</label>
+        <textarea id="urls" placeholder="https://example.com/a.jpg"></textarea>
+      </div>
+
+      <h2 style="margin-top:18px">任务</h2>
+      <div class="row">
+        <div class="field">
+          <label>task</label>
+          <select id="task">
+            <option value="detection">detection 检测</option>
+            <option value="grounding_single">grounding_single 单目标定位</option>
+            <option value="counting">counting 计数</option>
+            <option value="reasoning_detection">reasoning_detection 推理检测</option>
+            <option value="brief_region_caption">brief_region_caption 区域描述</option>
+            <option value="region_ocr">region_ocr 区域 OCR</option>
+            <option value="vqa">vqa 通用问答</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>lang</label>
+          <select id="lang"><option value="zh">zh</option><option value="en">en</option></select>
+        </div>
+      </div>
+      <div class="field">
+        <label id="textLabel">text（detection：类别用 ; 分隔）</label>
+        <textarea id="text">orange; apple</textarea>
+      </div>
+
+      <details>
+        <summary>高级参数（候选框 / 区域索引 / 渲染）</summary>
+        <div class="field" style="margin-top:10px">
+          <label>bbox_list（JSON，如 <code>[[12,20,180,210]]</code>；留空=自动候选框）</label>
+          <textarea id="bbox" placeholder="[[12,20,180,210],[190,25,430,250]]"></textarea>
+        </div>
+        <div class="field">
+          <label>target_region_indexes（区域任务必填，如 <code>[0]</code>）</label>
+          <input id="targets" placeholder="[0]">
+        </div>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px">
+          <input type="checkbox" id="renderPng" checked style="width:auto"> 返回带框图
+        </label>
+      </details>
+
+      <button id="runBtn" style="width:100%;margin-top:14px">运行</button>
+      <div class="hint" id="runHint">登录后可直接提交；多图会逐个排队执行（服务端 2 实例并行）。</div>
+    </section>
+
+    <section>
+      <div class="panel" id="infoPanel" style="margin-bottom:14px">
+        <h2>服务信息</h2>
+        <div class="meta" id="infoMeta">–</div>
+        <details><summary>原始配置</summary><pre class="answer" id="infoRaw" style="margin-top:8px"></pre></details>
+      </div>
+      <div class="results" id="results">
+        <div class="empty">提交任务后，这里会显示 answer、框坐标、耗时和带框图。</div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { key: sessionStorage.getItem('vlx_api_key') || '', files: [], info: null, running: 0 };
+
+// ---------- 基础请求 ----------
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (state.key) headers['Authorization'] = 'Bearer ' + state.key;
+  if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!r.ok) {
+    const msg = (data && data.error && (data.error.message || data.error)) || ('HTTP ' + r.status);
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
+
+// ---------- 登录 ----------
+async function login(key) {
+  $('#loginErr').textContent = '';
+  if (!key.trim()) { $('#loginErr').textContent = '请输入 API key'; return; }
+  $('#loginBtn').disabled = true;
+  try {
+    const r = await fetch('/v1/vlx/info', { headers: { Authorization: 'Bearer ' + key.trim() } });
+    if (!r.ok) throw new Error(r.status === 401 ? '密码错误（401）' : 'HTTP ' + r.status);
+    state.key = key.trim();
+    sessionStorage.setItem('vlx_api_key', state.key);
+    showApp();
+  } catch (e) {
+    $('#loginErr').textContent = e.message;
+  } finally {
+    $('#loginBtn').disabled = false;
+  }
+}
+$('#loginBtn').onclick = () => login($('#key').value);
+$('#key').addEventListener('keydown', (e) => { if (e.key === 'Enter') login($('#key').value); });
+
+function showApp() {
+  $('#login').style.display = 'none';
+  $('#app').hidden = false;
+  refreshHealth();
+  refreshInfo();
+}
+$('#logoutBtn').onclick = () => { sessionStorage.removeItem('vlx_api_key'); location.reload(); };
+
+// ---------- 状态 ----------
+async function refreshHealth() {
+  try {
+    const r = await fetch('/healthz');           // 探活接口不需要 key
+    const h = await r.json();
+    $('#pHealth').textContent = h.model_loaded ? `模型已加载 · ${h.workers_loaded}/${h.instances}` : '模型未加载（按需加载）';
+    $('#pHealth').className = 'pill ' + (h.model_loaded ? 'on' : 'off');
+    $('#pQueue').textContent = '队列 ' + h.queue_depth;
+  } catch { $('#pHealth').textContent = '服务不可达'; $('#pHealth').className = 'pill off'; }
+}
+async function refreshInfo() {
+  try {
+    const d = await api('/v1/vlx/info');
+    state.info = d;
+    const c = d.config || {};
+    $('#infoMeta').innerHTML = [
+      `精度 <b>${c.precision}</b>`, `实例 <b>${c.instances}</b>`,
+      `页面 <b>:${location.port || 80}</b>`,
+      `认证 <b>${c.auth_enabled ? '开启' : '关闭'}</b>`,
+      `图像预算 <b>${c.max_image_tokens} tok</b>`,
+      `成功/失败 <b>${d.stats.requests_ok}/${d.stats.requests_failed}</b>`,
+      `加载次数 <b>${d.stats.model_loads}</b>`
+    ].join(' · ');
+    $('#infoRaw').textContent = JSON.stringify(d.config, null, 2);
+  } catch (e) { $('#infoMeta').textContent = '读取失败：' + e.message; }
+}
+$('#refreshBtn').onclick = () => { refreshHealth(); refreshInfo(); };
+
+// ---------- 文件选择 ----------
+const drop = $('#drop');
+drop.onclick = () => $('#file').click();
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('drag'); };
+drop.ondragleave = () => drop.classList.remove('drag');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('drag'); addFiles(e.dataTransfer.files); };
+$('#file').onchange = (e) => addFiles(e.target.files);
+
+function addFiles(list) {
+  for (const f of list) {
+    if (!f.type.startsWith('image/')) continue;
+    state.files.push(f);
+  }
+  renderThumbs();
+}
+function renderThumbs() {
+  const box = $('#thumbs');
+  box.innerHTML = '';
+  state.files.forEach((f, i) => {
+    const fig = document.createElement('figure');
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.title = f.name;
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.onclick = () => { state.files.splice(i, 1); renderThumbs(); };
+    fig.append(img, btn);
+    box.append(fig);
+  });
+}
+
+// ---------- 任务表单联动 ----------
+const taskHelp = {
+  vqa: ['问题（自由文本）', 'what is in the image?'],
+  detection: ['类别，多个用 ; 分隔', 'orange; apple'],
+  grounding_single: ['一句指代表达', 'the orange on the left'],
+  counting: ['要计数的目标，多个用 ; 分隔', 'person; car'],
+  reasoning_detection: ['需要推理的问题', 'which object is used for drinking?'],
+  brief_region_caption: ['占位文本（会被区域索引替换）', 'describe'],
+  region_ocr: ['占位文本', 'read'],
+};
+function syncTaskUi() {
+  const t = $('#task').value;
+  const [label, ph] = taskHelp[t] || taskHelp.detection;
+  $('#textLabel').textContent = 'text（' + label + '）';
+  $('#text').placeholder = ph;
+  const region = (t === 'brief_region_caption' || t === 'region_ocr');
+  $('#targets').disabled = !region;
+  $('#runHint').textContent = region
+    ? '区域任务：target_region_indexes 必填（如 [0]），指向候选框；不传 bbox_list 时指向 WeDetect 自动候选框。'
+    : '多图会逐个排队执行（服务端 2 实例并行）。';
+}
+$('#task').onchange = syncTaskUi;
+syncTaskUi();
+
+// ---------- 提交与轮询 ----------
+function fileToDataURL(f) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(new Error('读取文件失败'));
+    r.readAsDataURL(f);
+  });
+}
+
+function cardFor(name) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `<div class="head"><span class="name"></span><span class="spacer"></span>
+      <span class="state queued">queued</span></div>
+    <div class="body"><div><img class="viz" alt="带框图" style="display:none">
+      <div class="meta"></div></div><div><pre class="answer">等待中…</pre>
+      <details><summary>框列表</summary><div class="boxes"></div></details></div></div>`;
+  el.querySelector('.name').textContent = name;
+  return el;
+}
+function setState(el, s) {
+  const b = el.querySelector('.state');
+  b.textContent = s; b.className = 'state ' + s;
+}
+
+async function submitOne(name, image) {
+  const el = cardFor(name);
+  $('#results').prepend(el);
+  const task = $('#task').value, lang = $('#lang').value, text = $('#text').value;
+  const body = { task, lang, text, image };
+  const renderPng = $('#renderPng').checked;
+  if (renderPng) body.render_png = true;
+  const bboxRaw = $('#bbox').value.trim();
+  if (bboxRaw) {
+    try { body.bbox_list = JSON.parse(bboxRaw); }
+    catch { setState(el, 'failed'); el.querySelector('.answer').textContent = 'bbox_list 不是合法 JSON'; return; }
+  }
+  const tRaw = $('#targets').value.trim();
+  if (tRaw) {
+    try { body.target_region_indexes = JSON.parse(tRaw); }
+    catch { setState(el, 'failed'); el.querySelector('.answer').textContent = 'target_region_indexes 不是合法 JSON'; return; }
+  }
+
+  let job;
+  try {
+    job = await api('/v1/vlx/infer', { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    setState(el, 'failed'); el.querySelector('.answer').textContent = '提交失败：' + e.message; return;
+  }
+  setState(el, job.state || 'queued');
+  el.querySelector('.answer').textContent = '排队中：' + job.job_id;
+
+  const t0 = Date.now();
+  while (true) {
+    await new Promise((r) => setTimeout(r, 300));
+    let j;
+    try { j = await api('/v1/vlx/jobs/' + job.job_id); }
+    catch (e) { setState(el, 'failed'); el.querySelector('.answer').textContent = '查询失败：' + e.message; return; }
+    setState(el, j.state);
+    if (j.state === 'done') { renderJob(el, j, Date.now() - t0); return; }
+    if (j.state === 'failed') {
+      el.querySelector('.answer').textContent = '失败：' + (j.error || 'unknown');
+      return;
+    }
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function prettyAnswer(a) {
+  return esc(a).replace(/&lt;ground&gt;/g, '<span class="mark">&lt;ground&gt;</span>')
+               .replace(/&lt;\/ground&gt;/g, '<span class="mark">&lt;/ground&gt;</span>')
+               .replace(/&lt;objects&gt;/g, '<span class="mark">&lt;objects&gt;</span>')
+               .replace(/&lt;\/objects&gt;/g, '<span class="mark">&lt;/objects&gt;</span>')
+               .replace(/&lt;think&gt;/g, '<span class="mark">&lt;think&gt;</span>')
+               .replace(/&lt;\/think&gt;/g, '<span class="mark">&lt;/think&gt;</span>');
+}
+
+async function renderJob(el, job, wallMs) {
+  const res = job.result || {};
+  const boxes = res.result_bbox_list || [];
+  const t = job.timings_ms || {};
+  const img = job.image || {};
+  el.querySelector('.answer').innerHTML = prettyAnswer(res.answer || '(空)');
+
+  // 带框图（需要请求时 render_png=true）
+  if (job.png_base64) {
+    const im = el.querySelector('.viz');
+    im.src = 'data:image/png;base64,' + job.png_base64;
+    im.style.display = '';
+  } else if ($('#renderPng').checked) {
+    try {
+      const r = await fetch('/v1/vlx/jobs/' + job.job_id + '/png',
+                            { headers: { Authorization: 'Bearer ' + state.key } });
+      if (r.ok) {
+        const blob = await r.blob();
+        const im = el.querySelector('.viz');
+        im.src = URL.createObjectURL(blob);
+        im.style.display = '';
+      }
+    } catch {}
+  }
+
+  el.querySelector('.meta').innerHTML = [
+    `耗时 <b>${Math.round(t.e2e_ms || wallMs)} ms</b>`,
+    `tokens <b>${res.prompt_tokens ?? '?'} / ${res.completion_tokens ?? '?'}</b>`,
+    `冷启动 <b>${job.cold_start ? '是' : '否'}</b>`,
+    `处理尺寸 <b>${img.width ?? '?'}×${img.height ?? '?'}</b>`,
+    img.resized ? `原图 <b>${img.original_width}×${img.original_height}</b>（已缩放）` : '',
+    `框 <b>${boxes.length}</b>`,
+    `worker <b>${job.worker}</b>`,
+  ].filter(Boolean).join(' · ');
+
+  if (boxes.length) {
+    const rows = boxes.map((b) => `<tr><td><code>${esc(b.object_index)}</code></td>
+      <td>${esc(b.label)}</td><td>${b.xmin.toFixed(0)}, ${b.ymin.toFixed(0)}</td>
+      <td>${b.xmax.toFixed(0)}, ${b.ymax.toFixed(0)}</td></tr>`).join('');
+    el.querySelector('.boxes').innerHTML =
+      `<table><thead><tr><th>索引</th><th>标签</th><th>左上</th><th>右下</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } else {
+    el.querySelector('.boxes').textContent = '无框（VQA 或未匹配）';
+  }
+}
+
+// ---------- 运行 ----------
+$('#runBtn').onclick = async () => {
+  const urls = $('#urls').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  if (!state.files.length && !urls.length) { alert('请先选择图片或填写图片 URL'); return; }
+  const task = $('#task').value;
+  const region = (task === 'brief_region_caption' || task === 'region_ocr');
+  if (region && !$('#targets').value.trim()) { alert('区域任务需要填写 target_region_indexes，例如 [0]'); return; }
+  if ((state.files.length + urls.length) > 1 && $('#bbox').value.trim()) {
+    alert('多图时不支持共用同一组 bbox_list，请单图提交或清空 bbox_list');
+    return;
+  }
+
+  $('#runBtn').disabled = true;
+  try {
+    for (const f of state.files) {
+      const dataUrl = await fileToDataURL(f);
+      await submitOne(f.name, dataUrl);
+    }
+    for (const u of urls) await submitOne(u, u);
+  } finally {
+    $('#runBtn').disabled = false;
+    refreshHealth();
+  }
+};
+
+// ---------- 启动 ----------
+if (state.key) {
+  fetch('/v1/vlx/info', { headers: { Authorization: 'Bearer ' + state.key } })
+    .then((r) => { if (r.ok) showApp(); else { sessionStorage.removeItem('vlx_api_key'); } })
+    .catch(() => {});
+} else {
+  $('#key').focus();
+}
+</script>
+</body>
+</html>

@@ -29,6 +29,8 @@
 │   ├── smoke.sh             # 7 任务冒烟测试
 │   ├── bench.py             # 显存/内存/tok-s 压测（按 PID 采样）
 │   ├── server/              # 常驻推理服务（原生异步接口 + 并发，见 SERVER.md）
+│   ├── web/index.html       # 单文件 Web 控制台（上传图片 / 跑 7 个任务 / 看框图）
+│   ├── nginx/               # nginx 配置（:8188 反代 + 静态页面）与软链安装脚本
 │   ├── .env                 # systemd EnvironmentFile（HOST=0.0.0.0 / PORT / INSTANCES…，git 忽略）
 │   ├── .env.example         # 环境变量模板
 │   ├── vlx-seek.service     # systemd unit（软链到 /etc/systemd/system）
