@@ -349,6 +349,59 @@ def phase_e() -> None:
         svc.stop()
 
 
+def phase_f() -> None:
+    """OpenAI 兼容接口（/v1/models + /v1/chat/completions）"""
+    print("\n=== Phase F：OpenAI 兼容接口 ===")
+    svc = Service(port=8116, instances=1, idle_s=0, tag="f")
+    img = base64.b64encode(IMAGE.read_bytes()).decode()
+    try:
+        check(svc.wait_ready(), "服务启动")
+        code, body = http("GET", svc.base + "/v1/models")
+        models = [m["id"] for m in json.loads(body).get("data", [])] if code == 200 else []
+        check(code == 200 and "vlx-seek-1.5-10b" in models, "GET /v1/models 返回模型列表",
+              str(models))
+
+        payload = {
+            "model": "vlx-seek-1.5-10b",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "orange; apple"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + img}}]}],
+            "temperature": 0, "max_tokens": 256,
+            "vlx_task": "detection", "vlx_lang": "zh",
+        }
+        t0 = time.time()
+        code, body = http("POST", svc.base + "/v1/chat/completions", payload, timeout=180)
+        r = json.loads(body) if code == 200 else {}
+        wall = round((time.time() - t0) * 1000)
+        check(code == 200 and r.get("object") == "chat.completion",
+              "POST /v1/chat/completions 返回 chat.completion", f"{wall}ms")
+        content = r.get("choices", [{}])[0].get("message", {}).get("content", "")
+        check("<ground>" in content, "content 是 grounded 答案", content[:40])
+        usage = r.get("usage") or {}
+        check(usage.get("prompt_tokens", 0) > 0 and usage.get("completion_tokens", 0) > 0,
+              "usage 正确", f"{usage.get('prompt_tokens')}+{usage.get('completion_tokens')}")
+        boxes = (r.get("vlx") or {}).get("result_bbox_list") or []
+        check(len(boxes) >= 3, "vlx.result_bbox_list 返回框", f"{len(boxes)} boxes")
+
+        check(http("POST", svc.base + "/v1/chat/completions",
+                   {"messages": [{"role": "user", "content": "no image"}]})[0] == 400,
+              "无图返回 400")
+        check(http("POST", svc.base + "/v1/chat/completions",
+                   {**payload, "temperature": 0.7})[0] == 400, "temperature>0 返回 400")
+        check(http("POST", svc.base + "/v1/chat/completions",
+                   {**payload, "stream": True})[0] == 400, "stream=true 返回 400")
+        vqa = {**payload, "vlx_task": "vqa",
+               "messages": [{"role": "user", "content": [
+                   {"type": "text", "text": "图里有什么水果？"},
+                   {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + img}}]}]}
+        code, body = http("POST", svc.base + "/v1/chat/completions", vqa, timeout=180)
+        r = json.loads(body) if code == 200 else {}
+        check(code == 200 and bool(r.get("choices", [{}])[0].get("message", {}).get("content")),
+              "vlx_task=vqa 走自由文本", (r.get("choices", [{}])[0].get("message", {}).get("content") or "")[:30])
+    finally:
+        svc.stop()
+
+
 def main() -> int:
     if not BIN.exists():
         print(f"缺少服务二进制：{BIN}\n先运行 deploy/server/build-server.sh")
@@ -361,6 +414,7 @@ def main() -> int:
     phase_c()
     phase_d()
     phase_e()
+    phase_f()
     print(f"\n=== 结果：PASS {PASS} / FAIL {FAIL} ===")
     return 0 if FAIL == 0 else 1
 

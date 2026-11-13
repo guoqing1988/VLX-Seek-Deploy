@@ -197,6 +197,14 @@ std::string trim_ws(std::string v) {
     return v;
 }
 
+// OpenAI 兼容的错误体
+void openai_error(httplib::Response& res, int status, const std::string& message,
+                  const char* type = "invalid_request_error") {
+    res.status = status;
+    res.set_content(json{{"error", {{"message", message}, {"type", type}, {"code", status}}}}.dump(),
+                    "application/json");
+}
+
 // ---------------- 配置 ----------------
 struct ServerOptions {
     std::string host = "0.0.0.0";
@@ -218,6 +226,7 @@ struct ServerOptions {
     int max_image_mb = 16;        // URL 下载的图像上限
     int max_image_tokens = 1200;  // 超过即等比缩小（1200 ≈ 1280x960，1.2 MP）
     int image_url_timeout_s = 10; // URL 下载超时
+    int openai_timeout_s = 300;   // /v1/chat/completions 同步等待上限
     std::string image_proxy;      // 可选 HTTP(S) 代理 host:port（默认读环境变量）
     std::string api_key;          // 空 = 不启用认证；支持逗号分隔的多个 key（轮换）
     int log_level = 1;
@@ -320,7 +329,11 @@ class VlxServer {
 
     // ---- HTTP ----
     void install_routes();
+    std::shared_ptr<Job> enqueue_infer(const json& body, httplib::Response& res);
+    bool wait_for_job(const std::shared_ptr<Job>& job, int timeout_ms);
     void handle_infer(const httplib::Request& req, httplib::Response& res);
+    void handle_openai_chat(const httplib::Request& req, httplib::Response& res);
+    void handle_openai_models(const httplib::Request& req, httplib::Response& res);
     void handle_job_get(const httplib::Request& req, httplib::Response& res);
     void handle_job_list(const httplib::Request& req, httplib::Response& res);
     void handle_job_cancel(const httplib::Request& req, httplib::Response& res);
@@ -902,6 +915,9 @@ void VlxServer::install_routes() {
     http_.Get("/v1/vlx/info", [this](const auto& r, auto& s) { handle_info(r, s); });
     http_.Post("/v1/vlx/unload", [this](const auto& r, auto& s) { handle_unload(r, s); });
     http_.Post("/v1/vlx/infer", [this](const auto& r, auto& s) { handle_infer(r, s); });
+    // OpenAI 兼容层（同步）：/v1/models + /v1/chat/completions
+    http_.Get("/v1/models", [this](const auto& r, auto& s) { handle_openai_models(r, s); });
+    http_.Post("/v1/chat/completions", [this](const auto& r, auto& s) { handle_openai_chat(r, s); });
     http_.Get("/v1/vlx/jobs", [this](const auto& r, auto& s) { handle_job_list(r, s); });
     http_.Get(R"(/v1/vlx/jobs/([A-Za-z0-9_\-]+))",
               [this](const auto& r, auto& s) { handle_job_get(r, s); });
@@ -1011,15 +1027,7 @@ bool VlxServer::fetch_image_url(const std::string& url, std::string* out,
     return true;
 }
 
-void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res) {
-    json body = json::parse(req.body, nullptr, false);
-    if (body.is_discarded() || !body.is_object()) {
-        res.status = 400;
-        res.set_content(json{{"error", "request body must be a JSON object"}}.dump(),
-                        "application/json");
-        return;
-    }
-
+std::shared_ptr<Job> VlxServer::enqueue_infer(const json& body, httplib::Response& res) {
     std::string task = body.value("task", "detection");
     std::string text = body.value("text", "");
     std::string lang = body.value("lang", "en");
@@ -1030,19 +1038,19 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
         res.status = 400;
         res.set_content(json{{"error", "unknown task"}, {"task", task},
                              {"allowed", json::array({"vqa", "detection", "grounding_single", "counting", "reasoning_detection", "brief_region_caption", "region_ocr"})}}.dump(), "application/json");
-        return;
+        return nullptr;
     }
     if (lang != "en" && lang != "zh") {
         res.status = 400;
         res.set_content(json{{"error", "lang must be \"en\" or \"zh\""}}.dump(),
                         "application/json");
-        return;
+        return nullptr;
     }
     if (image.empty()) {
         res.status = 400;
         res.set_content(json{{"error", "image is required (base64 or data: URL)"}}.dump(),
                         "application/json");
-        return;
+        return nullptr;
     }
     if (body.contains("max_new_tokens") || body.contains("temperature")) {
         res.status = 400;
@@ -1050,7 +1058,7 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
                               "max_new_tokens/temperature are server-wide: set them at startup "
                               "(--max-new-tokens), the service always decodes greedily"}}.dump(),
                         "application/json");
-        return;
+        return nullptr;
     }
 
     std::vector<float> boxes;
@@ -1060,14 +1068,14 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
                 res.status = 400;
                 res.set_content(json{{"error", "bbox_list entries must be [x1,y1,x2,y2]"}}.dump(),
                                 "application/json");
-                return;
+                return nullptr;
             }
             for (const auto& v : b) {
                 if (!v.is_number()) {
                     res.status = 400;
                     res.set_content(json{{"error", "bbox_list values must be numbers"}}.dump(),
                                     "application/json");
-                    return;
+                    return nullptr;
                 }
                 boxes.push_back(v.get<float>());
             }
@@ -1076,7 +1084,7 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
             res.status = 400;
             res.set_content(json{{"error", "at most 100 boxes are supported"}}.dump(),
                             "application/json");
-            return;
+            return nullptr;
         }
     }
     std::vector<int32_t> targets;
@@ -1086,7 +1094,7 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
                 res.status = 400;
                 res.set_content(json{{"error", "target_region_indexes must be integers"}}.dump(),
                                 "application/json");
-                return;
+                return nullptr;
             }
             targets.push_back(v.get<int32_t>());
         }
@@ -1095,19 +1103,19 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
         res.status = 400;
         res.set_content(json{{"error", "target_region_indexes is required for this task"}}.dump(),
                         "application/json");
-        return;
+        return nullptr;
     }
     if (!region_task(task) && !targets.empty()) {
         res.status = 400;
         res.set_content(json{{"error", "target_region_indexes is only valid for "
                                        "brief_region_caption/region_ocr"}}.dump(),
                         "application/json");
-        return;
+        return nullptr;
     }
     if (region_task(task) && boxes.empty()) {
         res.status = 400;
         res.set_content(json{{"error", "region tasks require bbox_list"}}.dump(), "application/json");
-        return;
+        return nullptr;
     }
 
     // 队列容量
@@ -1120,7 +1128,7 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
                                  {"max_queue", opts_.max_queue}}
                                 .dump(),
                             "application/json");
-            return;
+            return nullptr;
         }
     }
 
@@ -1131,12 +1139,12 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
         if (!fetch_image_url(image, &bytes, &err)) {
             res.status = 400;
             res.set_content(json{{"error", err}, {"image", image}}.dump(), "application/json");
-            return;
+            return nullptr;
         }
     } else if (!decode_image_field(image, &bytes, &err)) {
         res.status = 400;
         res.set_content(json{{"error", err}}.dump(), "application/json");
-        return;
+        return nullptr;
     }
 
     auto job = std::make_shared<Job>();
@@ -1150,7 +1158,7 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
             res.set_content(json{{"error", "failed to stage image"}}.dump(), "application/json");
             std::error_code ec;
             fs::remove(job->image_path, ec);
-            return;
+            return nullptr;
         }
     }
     // 分辨率上限：超过 --max-image-tokens 就等比缩小（不拒绝）。
@@ -1195,20 +1203,181 @@ void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res
     job->image_bytes = bytes.size();
     job->created_ms = now_ms();
 
-    json out;
     {
         std::lock_guard<std::mutex> lk(mu_);
         jobs_[job->id] = job;
         job_order_.push_back(job->id);
         queue_.push_back(job);
-        out = job_json(job, true);
     }
     cv_.notify_all();
     logmsg(0, "job %s: queued (%s, image %.1f KB)", job->id.c_str(), task.c_str(),
            double(job->image_bytes) / 1024.0);
+    return job;
+}
 
+
+void VlxServer::handle_infer(const httplib::Request& req, httplib::Response& res) {
+    json body = json::parse(req.body, nullptr, false);
+    if (body.is_discarded() || !body.is_object()) {
+        res.status = 400;
+        res.set_content(json{{"error", "request body must be a JSON object"}}.dump(),
+                        "application/json");
+        return;
+    }
+    auto job = enqueue_infer(body, res);
+    if (!job) return;  // 错误响应已写
+    json out;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        out = job_json(job, true);
+    }
     res.status = 202;
     res.set_content(out.dump(), "application/json");
+}
+
+// /v1/chat/completions：OpenAI 兼容外壳，内部复用同一个任务队列（同步等待结果）。
+// VLX 的扩展字段放在顶层（vlx_task / vlx_lang / bbox_list / target_region_indexes /
+// vlx_render_png）；图像取 messages[].content[] 里的 image_url。
+void VlxServer::handle_openai_chat(const httplib::Request& req, httplib::Response& res) {
+    json oai = json::parse(req.body, nullptr, false);
+    if (oai.is_discarded() || !oai.is_object()) {
+        openai_error(res, 400, "request body must be a JSON object");
+        return;
+    }
+    if (oai.value("stream", false)) {
+        openai_error(res, 400, "stream=true is not supported (responses are short and structured)");
+        return;
+    }
+    if (oai.contains("temperature") && oai["temperature"].is_number() &&
+        oai["temperature"].get<double>() > 0.0) {
+        openai_error(res, 400, "temperature must be 0: the service always decodes greedily");
+        return;
+    }
+    if (!oai.contains("messages") || !oai["messages"].is_array() || oai["messages"].empty()) {
+        openai_error(res, 400, "messages is required");
+        return;
+    }
+    const json* user = nullptr;
+    for (const auto& m : oai["messages"]) {
+        if (m.is_object() && m.value("role", "") == "user") user = &m;
+    }
+    if (!user) {
+        openai_error(res, 400, "a user message is required");
+        return;
+    }
+    std::string text, image;
+    const auto& content = (*user)["content"];
+    if (content.is_string()) {
+        text = content.get<std::string>();
+    } else if (content.is_array()) {
+        for (const auto& part : content) {
+            if (!part.is_object()) continue;
+            const std::string type = part.value("type", "");
+            if (type == "text") {
+                if (part.contains("text") && part["text"].is_string())
+                    text += part["text"].get<std::string>();
+            } else if (type == "image_url") {
+                if (!part.contains("image_url")) continue;
+                if (part["image_url"].is_object())
+                    image = part["image_url"].value("url", "");
+                else if (part["image_url"].is_string())
+                    image = part["image_url"].get<std::string>();
+            }
+        }
+    } else {
+        openai_error(res, 400, "message content must be a string or an array of parts");
+        return;
+    }
+    if (image.empty()) {
+        openai_error(res, 400,
+                     "an image is required: send content[{type:image_url,image_url:{url}}] "
+                     "(base64 data URL or http(s) URL)");
+        return;
+    }
+
+    // 转换成内部请求（与原生 /v1/vlx/infer 完全同一条链路）
+    json inner = {{"task", oai.value("vlx_task", "detection")},
+                  {"text", text},
+                  {"lang", oai.value("vlx_lang", "en")},
+                  {"image", image}};
+    if (oai.contains("bbox_list")) inner["bbox_list"] = oai["bbox_list"];
+    if (oai.contains("target_region_indexes"))
+        inner["target_region_indexes"] = oai["target_region_indexes"];
+    if (oai.value("vlx_render_png", false)) inner["render_png"] = true;
+
+    auto job = enqueue_infer(inner, res);
+    if (!job) {
+        // 把内部错误体转成 OpenAI 格式
+        std::string msg = "invalid request";
+        const json e = json::parse(res.body, nullptr, false);
+        if (!e.is_discarded() && e.contains("error")) msg = e["error"].dump();
+        openai_error(res, res.status, msg);
+        return;
+    }
+    if (!wait_for_job(job, opts_.openai_timeout_s * 1000)) {
+        openai_error(res, 504, "inference timed out", "server_error");
+        return;
+    }
+
+    json j;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        j = job_json(job, false);
+    }
+    if (j["state"] == "failed") {
+        openai_error(res, 500, j["error"].is_string() ? j["error"].get<std::string>() : "inference failed",
+                     "server_error");
+        return;
+    }
+    const json& result = j["result"];
+    const std::string answer =
+        (result.is_object() && result.contains("answer") && result["answer"].is_string())
+            ? result["answer"].get<std::string>()
+            : "";
+    const int64_t pt = (result.is_object() && result.contains("prompt_tokens"))
+                           ? result["prompt_tokens"].get<int64_t>()
+                           : 0;
+    const int64_t ct = (result.is_object() && result.contains("completion_tokens"))
+                           ? result["completion_tokens"].get<int64_t>()
+                           : 0;
+    json resp = {
+        {"id", "chatcmpl-" + job->id},
+        {"object", "chat.completion"},
+        {"created", int64_t(std::time(nullptr))},
+        {"model", "vlx-seek-1.5-10b"},
+        {"choices", json::array({{{"index", 0},
+                                  {"message", {{"role", "assistant"}, {"content", answer}}},
+                                  {"finish_reason", "stop"}}})},
+        {"usage", {{"prompt_tokens", pt}, {"completion_tokens", ct}, {"total_tokens", pt + ct}}},
+        {"vlx", {{"job_id", job->id},
+                 {"task", job->task},
+                 {"result_bbox_list", (result.is_object() && result.contains("result_bbox_list"))
+                                          ? result["result_bbox_list"]
+                                          : json::array()},
+                 {"timings_ms", j["timings_ms"]},
+                 {"cold_start", j["cold_start"]},
+                 {"load_ms", j["load_ms"]},
+                 {"image", j["image"]},
+                 {"png_base64", j["png_base64"]}}}};
+    res.status = 200;
+    res.set_content(resp.dump(), "application/json");
+}
+
+// GET /v1/models：OpenAI 客户端通常先探测模型列表
+void VlxServer::handle_openai_models(const httplib::Request&, httplib::Response& res) {
+    json data = json::array({{{"id", "vlx-seek-1.5-10b"},
+                              {"object", "model"},
+                              {"created", int64_t(0)},
+                              {"owned_by", "omlab"}}});
+    res.set_content(json{{"object", "list"}, {"data", data}}.dump(), "application/json");
+}
+
+bool VlxServer::wait_for_job(const std::shared_ptr<Job>& job, int timeout_ms) {
+    std::unique_lock<std::mutex> lk(mu_);
+    return cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&] {
+        return job->state == JobState::Done || job->state == JobState::Failed ||
+               job->state == JobState::Cancelled;
+    });
 }
 
 void VlxServer::handle_job_get(const httplib::Request& req, httplib::Response& res) {
@@ -1323,6 +1492,7 @@ std::string VlxServer::models_info_json() const {
     return json{{"device", opts_.device},
                 {"gpu", opts_.gpu.empty() ? json(nullptr) : json(opts_.gpu)},
                 {"auth_enabled", !opts_.api_key.empty()},
+                {"endpoints", json::array({"/v1/vlx/infer (async)", "/v1/vlx/jobs/{id}", "/v1/chat/completions (OpenAI, sync)", "/v1/models", "/healthz", "/metrics"})},
                 {"auth_header", opts_.api_key.empty() ? json(nullptr) : json("Authorization: Bearer <key>")},
                 {"cuda_visible_devices",
                  std::getenv("CUDA_VISIBLE_DEVICES") ? json(std::getenv("CUDA_VISIBLE_DEVICES"))
@@ -1483,6 +1653,7 @@ void usage() {
                  "  --image-url-timeout-s N  URL 下载超时秒 [10]\n"
                  "  --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）\n"
                  "  --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）\n"
+                 "  --openai-timeout-s N     /v1/chat/completions 同步等待上限 [300]\n"
                  "  --log-level N            0=DEBUG 1=INFO 2=WARN 3=ERROR [1]\n",
                  kVersion);
 }
@@ -1521,6 +1692,7 @@ bool parse_args(int argc, char** argv, ServerOptions* o) {
         else if (a == "--image-url-timeout-s") o->image_url_timeout_s = std::atoi(next("--image-url-timeout-s").c_str());
         else if (a == "--image-proxy") o->image_proxy = next("--image-proxy");
         else if (a == "--api-key") o->api_key = next("--api-key");
+        else if (a == "--openai-timeout-s") o->openai_timeout_s = std::atoi(next("--openai-timeout-s").c_str());
         else if (a == "--log-level") o->log_level = std::atoi(next("--log-level").c_str());
         else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());

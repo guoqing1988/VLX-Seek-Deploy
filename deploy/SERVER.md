@@ -62,6 +62,7 @@ HOST=0.0.0.0 PORT=8200 INSTANCES=4 ./deploy/server/serve.sh --log-level 0
 #   --image-url-timeout-s N  URL 下载超时秒 [10]
 #   --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy，本机地址不走代理）
 #   --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）
+#   --openai-timeout-s N     /v1/chat/completions 同步等待上限 [300]
 #   --max-image-tokens N 图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]
 #   --log-level N        0=DEBUG 1=INFO 2=WARN 3=ERROR [1]
 ```
@@ -197,12 +198,64 @@ curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
 - 比较是恒定时间的；key 不写日志，`/v1/vlx/info` 只暴露 `auth_enabled` 与头格式，不回显 key
 - 修改 `.env` 后 `./deploy/install-service.sh restart`
 
-### 3.3 运维接口
+### 3.3 OpenAI 兼容接口（同步）
+
+同一进程内两套接口并存：原生异步（`/v1/vlx/*`，推荐，支持并发与长任务）与 OpenAI 兼容
+（`/v1/chat/completions`，同步等结果，方便接入现成 SDK）。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /v1/models` | `{"object":"list","data":[{"id":"vlx-seek-1.5-10b",...}]}` |
+| `POST /v1/chat/completions` | 同步推理；内部复用同一个任务队列 |
+
+请求：取**最后一条 `role=user`** 的 `content`，数组形式里 `type=text` 是文本、`type=image_url`
+是图像（base64 data URL 或 http(s) URL）。VLX 参数放顶层扩展字段。
+
+```bash
+curl -s localhost:8110/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "vlx-seek-1.5-10b",
+  "messages": [{"role":"user","content":[
+      {"type":"text","text":"orange; apple"},
+      {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}]}],
+  "temperature": 0,
+  "vlx_task": "detection", "vlx_lang": "zh"
+}'
+```
+
+Python OpenAI SDK（已实测）：
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8110/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="vlx-seek-1.5-10b",
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "orange; apple"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]}],
+    temperature=0,
+    extra_body={"vlx_task": "detection", "vlx_lang": "zh"})
+print(resp.choices[0].message.content)        # <ground>orange</ground><objects>...
+print(resp.model_extra["vlx"]["result_bbox_list"])
+```
+
+响应是标准 `chat.completion`（`id/object/created/model/choices/usage`），额外带 `vlx` 块：
+`job_id`、`task`、`result_bbox_list`、`timings_ms`、`cold_start`、`load_ms`、`image`、`png_base64`。
+
+行为与限制：
+
+- 同步等待，上限 `--openai-timeout-s`（默认 300 s），超时返回 504
+- `temperature > 0` → 400（服务固定贪心解码）；`stream=true` → 400（不支持流式）
+- `max_tokens` 被忽略，长度由服务级 `--max-new-tokens` 控制
+- 必须有图像（VLX 是视觉模型），否则 400
+- 错误体是 OpenAI 格式：`{"error":{"message":...,"type":...,"code":...}}`
+- 启用 API key 时同样受保护（`/v1/models` 也要凭证）
+
+### 3.4 运维接口
 
 | 接口 | 说明 |
 |---|---|
 | `GET /healthz` | `model_loaded`、每 worker 的 `state/busy/load_ms/runs`、`queue_depth`。**不触发加载** |
-| `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e） |
+| `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e），含 `endpoints` 列表 |
 | `POST /v1/vlx/unload?wait=1&timeout_ms=30000` | 强制卸载；`wait=1` 等到 worker 真正释放 |
 | `GET /metrics` | Prometheus 文本：队列深度、请求数、加载/卸载次数、token 累计、每 worker 状态（启用 API key 时需带凭证） |
 
@@ -215,7 +268,8 @@ curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
 | 404 | job 不存在 |
 | 409 | 取消一个正在运行的任务 |
 | 429 | 队列已满（`--max-queue`） |
-| 500 | 内部错误 |
+| 500 | 内部错误（OpenAI 接口：任务失败也会转成 500 + OpenAI 错误体） |
+| 504 | OpenAI 接口同步等待超时（`--openai-timeout-s`） |
 | 任务内错误 | 任务 `state=failed`，`error` 字段给出原因（如 `model load failed: ...`、`image decode failed`） |
 
 ## 4. 模型生命周期（实测）
@@ -390,6 +444,7 @@ python3 deploy/server/test_server.py    # 29 项断言，自动起停服务
 热请求延迟 → 空闲卸载（显示 + 显存归零）→ 卸载后自动重载 → 手动卸载 → /metrics →
 2 实例并发（不同 worker）→ 取消排队任务 → /v1/vlx/info 统计 → URL 图像输入/404/协议校验 →
 2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图 →
-API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换。
+API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换 →
+OpenAI 兼容：/v1/models、chat.completion + usage + vlx 框、无图/temperature>0/stream 400、vqa 自由文本。
 
-最近一次结果：`PASS 49 / FAIL 0`（含大图自动缩放与 API key 认证；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
+最近一次结果：`PASS 59 / FAIL 0`（含大图自动缩放、API key 认证、OpenAI 兼容接口；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。

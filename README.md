@@ -86,10 +86,12 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
 ./deploy/server/serve.sh --preload       # 默认 0.0.0.0:8110，2 实例，空闲 300s 卸载
-python3 deploy/server/test_server.py     # 49 项验收（自动起停）
+python3 deploy/server/test_server.py     # 59 项验收（自动起停）
 ```
 
-接口是**原生异步**（提交任务 → 轮询结果），不是 OpenAI 兼容：
+服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。
+
+原生异步（提交任务 → 轮询结果）：
 
 ```bash
 curl -s localhost:8110/v1/vlx/infer -H 'Content-Type: application/json' -d '{
@@ -103,6 +105,27 @@ curl -s localhost:8110/v1/vlx/jobs/job-1
 ```
 
 运维接口：`GET /healthz`、`GET /v1/vlx/info`、`POST /v1/vlx/unload?wait=1`、`GET /metrics`。
+
+### OpenAI 兼容接口
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8110/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="vlx-seek-1.5-10b",
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "orange; apple"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]}],
+    temperature=0,
+    extra_body={"vlx_task": "detection", "vlx_lang": "zh"})
+print(resp.choices[0].message.content)              # <ground>orange</ground><objects>...
+print(resp.model_extra["vlx"]["result_bbox_list"])  # 框 + timings
+```
+
+- `GET /v1/models`、`POST /v1/chat/completions`（标准 `chat.completion` + 额外 `vlx` 块）
+- 同步等待（`--openai-timeout-s`，默认 300 s）；`stream=true` 与 `temperature>0` 返回 400；
+  `max_tokens` 被忽略（服务级 `--max-new-tokens`）
+- 两套接口共用同一个任务队列与模型实例，并发/生命周期行为完全一致
 
 ### API key 认证
 
@@ -187,6 +210,7 @@ cp deploy/.env.example deploy/.env      # 按需修改 HOST/PORT/GPU/INSTANCES/E
 | 服务热请求 | **0.52–0.74 s** |
 | 服务冷启动（懒加载） | 2.9 s；卸载后首请求同 |
 | 2 实例显存 | 22.6 GiB（640×480 输入） |
+| OpenAI 兼容接口 | Python openai SDK 实测通过（`/v1/models` + `chat.completions`） |
 | 精度对比（服务） | q8_0 11.7 GiB / 472 ms；f16 12.4 GiB / 473 ms，输出一致 |
 
 ## 精度选择（q8_0 / f16）
