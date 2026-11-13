@@ -52,6 +52,24 @@
 
 工具链版本：gcc 13.1、cmake 3.22、**CUDA toolkit 13.0.88**（`nvcc` 13.0，产物链接 `libcudart.so.13`）、目标架构 `sm_89`。
 
+### 上游补丁（`deploy/patches/`）
+
+C API 复用 ctx 需要 3 个修复（GPU 漏 HFRE 融合 / 复用不清 KV cache / 图按首次 shape 复用），
+外加 `decode_ms` 暴露。这些以 patch 形式随部署仓库分发：
+
+```
+deploy/patches/0001-capi-ctx-reuse-fixes.patch
+```
+
+`deploy/server/build-server.sh` 在 CMake 配置前自动应用（幂等 + 失败即停）：
+
+- 已应用 → `git apply --reverse --check` 通过，跳过
+- 未应用 → `git apply --check` 通过则应用，否则**退出并提示重新生成 patch**
+- 因此 `cpp_ggml` 的 `git status` 显示这 5 个文件 dirty 是**预期状态**
+  （与项目自带的 `cpp_ggml/third_party/llama-patches/` 机制一致）
+
+重新 clone 上游 + 部署仓库后，直接 `./deploy/server/build-server.sh` 即可，无需手工改源码。
+
 ### CUDA 版本口径
 
 | 来源 | 显示 | 含义 |

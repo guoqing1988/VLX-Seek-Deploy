@@ -1,0 +1,223 @@
+diff --git a/.gitignore b/.gitignore
+index 9e2322b..5ebb6f6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,15 @@ cpp_ggml/build*/
+ # benchmark intermediate renders (final charts are committed under charts/)
+ cpp_ggml/benchmarks/results/**/*.png
+ demo/_app_runs/
++
++# 部署产物（构建目录已由 cpp_ggml/build*/ 覆盖）
++deploy/out/
++deploy/logs/
++
++# 常驻服务构建/运行产物
++deploy/server/build/
++deploy/server/tmp/
++deploy/server/test-*.log
++
++# 本地服务配置（模板见 .env.example）
++deploy/.env
+diff --git a/cpp_ggml/include/vlx/vlx_seek_capi.h b/cpp_ggml/include/vlx/vlx_seek_capi.h
+index 4ae4f02..8d354eb 100644
+--- a/cpp_ggml/include/vlx/vlx_seek_capi.h
++++ b/cpp_ggml/include/vlx/vlx_seek_capi.h
+@@ -153,6 +153,9 @@ VLX_CAPI const char* vlx_seek_result_box_label(const vlx_seek_ctx* ctx,
+ /** Token counts of the most recent run. */
+ VLX_CAPI int32_t vlx_seek_result_prompt_tokens(const vlx_seek_ctx* ctx);
+ VLX_CAPI int32_t vlx_seek_result_completion_tokens(const vlx_seek_ctx* ctx);
++/** Pure decode time of the most recent run in milliseconds (excludes vision
++ *  graphs and prefill); useful for tokens/second reporting. */
++VLX_CAPI double vlx_seek_result_decode_ms(const vlx_seek_ctx* ctx);
+ /** WeDetect proposal count of the most recent run (0 when the caller passed
+  *  boxes). */
+ VLX_CAPI int32_t vlx_seek_result_proposal_count(const vlx_seek_ctx* ctx);
+diff --git a/cpp_ggml/src/vlx_seek_capi.cpp b/cpp_ggml/src/vlx_seek_capi.cpp
+index d16b60c..bbd23ee 100644
+--- a/cpp_ggml/src/vlx_seek_capi.cpp
++++ b/cpp_ggml/src/vlx_seek_capi.cpp
+@@ -224,6 +224,10 @@ int32_t vlx_seek_result_completion_tokens(const vlx_seek_ctx* ctx) {
+     return ctx && ctx->has_last ? ctx->last.completion_tokens : 0;
+ }
+ 
++double vlx_seek_result_decode_ms(const vlx_seek_ctx* ctx) {
++    return ctx && ctx->has_last ? ctx->last.decode_ms : 0.0;
++}
++
+ int32_t vlx_seek_result_proposal_count(const vlx_seek_ctx* ctx) {
+     return ctx && ctx->has_last ? ctx->last.proposal_count : 0;
+ }
+diff --git a/cpp_ggml/src/vlx_seek_runtime.cpp b/cpp_ggml/src/vlx_seek_runtime.cpp
+index 6c59336..8d18b57 100644
+--- a/cpp_ggml/src/vlx_seek_runtime.cpp
++++ b/cpp_ggml/src/vlx_seek_runtime.cpp
+@@ -64,6 +64,14 @@ struct VlxSeekRuntime::Impl {
+     std::unique_ptr<RadioGraph> radio;
+     std::unique_ptr<HfreEncoder> hfre;
+ 
++    // 图缓存按输入 shape 复用：这些图各自持有按首次 run 分配的 gallocr
++    // buffer，输入尺寸/数量变化后继续复用会越界写（进程崩溃）。所以记录
++    // 建图 key，shape 变化就重建。
++    int det_w = -1, det_h = -1;
++    int mm_gh = -1, mm_gw = -1;
++    int fpn_gh = -1, fpn_gw = -1;
++    int radio_h = -1, radio_w = -1;
++
+     void dump(const char* name, const void* p, size_t bytes) const {
+         if (!opts.dump_dir.empty()) write_file(std::string(opts.dump_dir) + "/" + name, p, bytes);
+     }
+@@ -140,7 +148,9 @@ bool VlxSeekRuntime::load() {
+     s.vocab = llama_model_get_vocab(s.llm);
+     llama_context_params cp = llama_context_default_params();
+     cp.n_ctx = 8192;
+-    cp.n_batch = 2048;
++    // 一次性 prefill 整段 prompt：n_batch 必须覆盖（图像 token + 100 区域
++    // token + 文本）。2048 只够 ~1280x960，4096 覆盖到 ~2400x1600。
++    cp.n_batch = 4096;
+     cp.n_threads = s.threads;
+     cp.n_threads_batch = s.threads;
+     s.lctx = llama_init_from_model(s.llm, cp);
+@@ -208,7 +218,11 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+             std::fprintf(stderr, "Using %zu proposals from the caller.\n", raw.size());
+         } else {
+             // WeDetect-Uni conv graph (lazy weight upload, then resident).
+-            if (!s.wedetect) s.wedetect.reset(new WeDetectGraph(s.backend, &s.wedetect_gguf));
++            if (!s.wedetect || s.det_w != img.width || s.det_h != img.height) {
++                s.wedetect.reset(new WeDetectGraph(s.backend, &s.wedetect_gguf));
++                s.det_w = img.width;
++                s.det_h = img.height;
++            }
+             WeDetectResult res;
+             if (!s.wedetect->run(img, &res, false, &out.error)) {
+                 out.code = -2;
+@@ -279,7 +293,7 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+       const auto t_pass = Clock::now();
+     {
+         GgufFile& vg = s.vision_gguf;
+-        if (!s.mm) {
++        if (!s.mm || s.mm_gh != gh || s.mm_gw != gw) {
+             MmprojConfig mc;
+         mc.patch_size = int(vg.i32("vlx.mmproj.patch_size", mc.patch_size));
+         mc.temporal = int(vg.i32("vlx.mmproj.temporal", mc.temporal));
+@@ -292,6 +306,8 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+         mc.pos_side = int(vg.i32("vlx.mmproj.pos_side", mc.pos_side));
+         mc.rope_theta = float(vg.f32v("vlx.mmproj.rope_theta", mc.rope_theta));
+         s.mm.reset(new MmprojGraph(s.backend, mc, &vg));
++        s.mm_gh = gh;
++        s.mm_gw = gw;
+     }
+     if (!s.mm->run(pix_bf16.data(), gh, gw, &ll_tokens, nullptr, &out.error)) {
+         out.code = -2;
+@@ -312,7 +328,11 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+         fc.roi_aligned = hc.roi_aligned =
+             s.vision_gguf.i32("vlx.hfre.roi_aligned", 1) != 0;
+         hc.n_threads = s.threads;
+-        if (!s.fpn) s.fpn.reset(new SimpleFpnGraph(s.backend, fc, &s.vision_gguf));
++        if (!s.fpn || s.fpn_gh != gh || s.fpn_gw != gw) {
++            s.fpn.reset(new SimpleFpnGraph(s.backend, fc, &s.vision_gguf));
++            s.fpn_gh = gh;
++            s.fpn_gw = gw;
++        }
+         std::vector<FeatureLevel> vt_levels;
+         const bool roialign_gpu =
+ #if defined(VLX_HAS_ROIALIGN_CUDA)
+@@ -342,7 +362,11 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+                                            : int(std::lround(float(i + 1) * rc.depth / 4.f)) - 1;
+             hc.aux_spatial_scale =
+                 float(s.vision_gguf.f32v("vlx.hfre.aux_spatial_scale", 1.0 / rc.patch_size));
+-            if (!s.radio) s.radio.reset(new RadioGraph(s.backend, rc, &s.vision_gguf));
++            if (!s.radio || s.radio_h != aH || s.radio_w != aW) {
++                s.radio.reset(new RadioGraph(s.backend, rc, &s.vision_gguf));
++                s.radio_h = aH;
++                s.radio_w = aW;
++            }
+             if (!s.radio->run(aux_hwc.data(), aH, aW, &aux_levels, &out.error,
+                               roialign_gpu)) {
+                 out.code = -2;
+@@ -370,26 +394,44 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+             }
+             const std::vector<float> strides = {4.f, 8.f, 16.f, 32.f};
+             std::string cerr2;
++            // GPU fast path: aux/vt RoIAlign stay on the device and the HFRE
++            // fusion (concat + sine pos-embed) also runs there, exactly like
++            // vlx_cli.cpp. Leaving out the fuse would feed an empty `fused`
++            // to aux_proj (the C API bug this replaces).
++            float* d_aux_out = nullptr;
++            float* d_vt_out[4] = {};
+             if ((cerr2 = cuda_encode_aux_dev(aux_ts, 4, boxes, hc.roi_output_size,
+                                              hc.roi_aligned, hc.aux_spatial_scale,
+-                                             &aux_nxc)).empty()) {
++                                             nullptr, &d_aux_out)).empty()) {
+                 const int Cvt = vt_levels[0].channels;
+-                vt_nxc.assign(size_t(Nb) * 4 * Cvt, 0.f);
++                const int aux_C = int(aux_ts[0]->ne[2]) * 4;
+                 pooled = true;
+                 for (int li = 0; li < 4 && pooled; ++li) {
+-                    std::vector<float> level_roi;
+-                    if ((cerr2 = cuda_pool_dev(vt_ts[li], vt_boxes, 1.f / strides[li],
+-                                               hc.roi_output_size, hc.roi_aligned,
+-                                               &level_roi)).empty()) {
+-                        for (size_t bi = 0; bi < Nb; ++bi)
+-                            std::memcpy(&vt_nxc[bi * 4 * Cvt + li * Cvt],
+-                                        &level_roi[bi * Cvt], sizeof(float) * Cvt);
++                    if (!(cerr2 = cuda_pool_dev(vt_ts[li], vt_boxes, 1.f / strides[li],
++                                                hc.roi_output_size, hc.roi_aligned,
++                                                nullptr, &d_vt_out[li])).empty())
++                        pooled = false;
++                }
++                if (pooled) {
++                    // pos-embed frame = vt feature extent / vt_spatial_scale
++                    const float img_w = float((gw / 2) * int(1.f / hc.vt_spatial_scale));
++                    const float img_h = float((gh / 2) * int(1.f / hc.vt_spatial_scale));
++                    if ((cerr2 = cuda_fuse_dev(d_aux_out, d_vt_out[0], d_vt_out[1],
++                                               d_vt_out[2], d_vt_out[3], boxes,
++                                               img_w, img_h, aux_C, Cvt,
++                                               hc.pos_embedding_dim,
++                                               &fused)).empty()) {
++                        vt_nxc.resize(0);  // fused directly; vt staging unused
+                     } else {
+                         pooled = false;
+                     }
+                 }
+             }
+-            if (!pooled) out.error = cerr2;  // fall through to the host path
++            const float* cleanup[5] = {d_aux_out, d_vt_out[0], d_vt_out[1],
++                                       d_vt_out[2], d_vt_out[3]};
++            cuda_free_dev_ptrs(cleanup, 5);
++            if (!pooled && !cerr2.empty())
++                out.error = cerr2;  // fall through to the host path
+         }
+ #endif
+         if (!pooled) {
+@@ -500,6 +542,10 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+     }
+     const auto t_llm = Clock::now();
+     int64_t pos = 0;
++    // 同一个 ctx 连续服务多个请求：先清空 KV cache，否则第二次 prefill 的
++    // positions 与上一条序列的残留冲突，balloc->init 会失败（C API 连续
++    // 调用 bug；CLI 每次新建 ctx 所以从未触发）。
++    if (llama_memory_t mem = llama_get_memory(s.lctx)) llama_memory_clear(mem, true);
+     if (decode_entries(s.lctx, entries, n_embd, &pos)) {
+         out.code = -2;
+         out.error = "prefill failed";
+@@ -516,6 +562,7 @@ VlxRunResult VlxSeekRuntime::run(const VlxRunRequest& req) {
+     double decode_ms = 0;
+     const std::vector<llama_token> gen =
+         generate(s.lctx, s.vocab, s.opts.max_new_tokens, stop, 0.f, 1.f, &pos, &decode_ms);
++        out.decode_ms = decode_ms;
+     out.completion_tokens = int32_t(gen.size());
+     out.llm_ms = ms_since(t_llm);
+     if (!s.opts.dump_dir.empty()) {
+diff --git a/cpp_ggml/src/vlx_seek_runtime.hpp b/cpp_ggml/src/vlx_seek_runtime.hpp
+index 1fe5b51..8c8ebe5 100644
+--- a/cpp_ggml/src/vlx_seek_runtime.hpp
++++ b/cpp_ggml/src/vlx_seek_runtime.hpp
+@@ -62,6 +62,8 @@ struct VlxRunResult {
+            serialization_ms = 0, e2e_ms = 0;
+     // per-stage vision/llm split of inference_ms (informational)
+     double vision_ms = 0, llm_ms = 0;
++    // pure autoregressive decode time (excludes vision graphs + prefill)
++    double decode_ms = 0;
+ };
+ 
+ class VlxSeekRuntime {

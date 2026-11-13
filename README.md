@@ -51,7 +51,7 @@ deploy/
 | GPU | NVIDIA，实测 RTX 5880 Ada（sm_89）48 GB；单实例需 9–14 GiB 显存 |
 | CUDA | **编译/运行使用 toolkit 13.0.88**（`deploy/env.sh` 固定 `CUDA_HOME=/usr/local/cuda-13.0`，产物链接 `libcudart.so.13`）；用 `VLX_CUDA_ARCH` 指定架构，默认 `89`。`nvidia-smi` 报的 `CUDA Version: 13.0` 是驱动（580.173.02）支持上限，与本机 toolkit 一致；12.8 也验证过（输出逐 token 一致） |
 | 编译 | gcc 13、cmake ≥ 3.14、32 线程编译约 2 分钟 |
-| 上游源码 | `Asher-1/VLX-Seek-GGML`（**必须用这个仓库**，它含 `cpp_ggml/`），且已 `git submodule update --init --recursive` |
+| 上游源码 | `Asher-1/VLX-Seek-GGML`（**必须用这个仓库**，它含 `cpp_ggml/`），且已 `git submodule update --init --recursive`；C API 修复由 `deploy/patches/*.patch` 在构建时自动应用（源码 dirty 属预期） |
 | 模型权重 | 4 个 GGUF，约 12.6 GiB（**不在本仓库**）：`vlx-10b-llm-q8_0`、`vlx-vision-10b-{f16,q8_0}`、`wedetect-base-uni-f32` |
 | 服务依赖 | 本机已验证：OpenSSL 开发包（HTTPS 图像 URL 需要）；无新增 Python 依赖 |
 

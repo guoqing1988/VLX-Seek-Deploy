@@ -11,7 +11,12 @@ endif()
 
 # 部署服务复用 cpp_ggml 的 C API（vlx_seek_capi.h）+ 唯一 ggml 源（llama.cpp）。
 # 上游代码零改动：这里只把 cpp_ggml 作为子目录引入并链接 vlxvision/llama。
-set(VLX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "仓库根目录")
+# 注意：deploy 可能是软链（指向部署仓库），CMake 会把 CMAKE_CURRENT_SOURCE_DIR
+# 解析成真实路径，用相对路径推不出 VLX-Seek 项目根。优先用 build-server.sh 传的
+# -DVLX_ROOT=<项目根>，缺失时才回退到相对路径。
+if(NOT VLX_ROOT)
+    set(VLX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "VLX-Seek 项目根目录")
+endif()
 set(LLAMA_DIR "${VLX_ROOT}/cpp_ggml/third_party/llama.cpp")
 
 find_package(Threads REQUIRED)

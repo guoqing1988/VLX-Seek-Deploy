@@ -22,10 +22,31 @@ command -v cmake >/dev/null || die "cmake 未安装"
 [ -f "$PROJECT_ROOT/cpp_ggml/third_party/llama.cpp/CMakeLists.txt" ] \
     || die "llama.cpp 子模块缺失: git submodule update --init --recursive"
 
+# 应用 deploy/patches/*.patch 到上游源码（幂等：已应用则跳过；不适用则退出）
+apply_vlx_patches() {
+    local pdir="$HERE/../patches"
+    [ -d "$pdir" ] || return 0
+    shopt -s nullglob
+    local p
+    for p in "$pdir"/*.patch; do
+        if git -C "$PROJECT_ROOT" apply --reverse --check "$p" 2>/dev/null; then
+            echo "== patch 已应用: $(basename "$p") ==" | tee -a "$LOG"
+        elif git -C "$PROJECT_ROOT" apply --check "$p" 2>/dev/null; then
+            git -C "$PROJECT_ROOT" apply "$p" || die "应用 patch 失败: $p"
+            echo "== 已应用 patch: $(basename "$p") ==" | tee -a "$LOG"
+        else
+            die "patch 不适用于当前源码（上游更新了？请重新生成）: $p"
+        fi
+    done
+    shopt -u nullglob
+}
+apply_vlx_patches
+
 echo "== 配置 ($BUILD_DIR, CUDA arch=$VLX_CUDA_ARCH) ==" | tee -a "$LOG"
 cmake -S "$HERE" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DVLX_GGML_CUDA=ON \
+    -DVLX_ROOT="$PROJECT_ROOT" \
     -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
     -DCUDAToolkit_ROOT="$CUDA_HOME" \
     -DCMAKE_CUDA_ARCHITECTURES="$VLX_CUDA_ARCH" \
