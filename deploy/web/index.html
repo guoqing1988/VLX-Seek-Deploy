@@ -48,6 +48,8 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   .card .head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
   .card .head .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card .head .dur{color:var(--muted);font-size:12px;margin-left:10px;white-space:nowrap}
+  .dur-badge{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--fg)}
   .card .head .spacer{flex:1}
   .state{font-size:12px;padding:2px 8px;border-radius:999px}
   .state.queued{color:var(--muted);border:1px solid var(--line)}
@@ -471,7 +473,10 @@ async function submitOne(name, image) {
       return;
     }
     if (j.state === 'running') {
-      setLoadingText(el, '推理中…（' + ((Date.now() - t0) / 1000).toFixed(1) + ' s）');
+      const waitS = j.started_at_ms ? (j.started_at_ms - j.created_at_ms) / 1000 : 0;
+      const runS = j.started_at_ms ? (Date.now() - t0) / 1000 - waitS : (Date.now() - t0) / 1000;
+      setLoadingText(el, '推理中…（' + runS.toFixed(1) + ' s）');
+      el.querySelector('.dur').textContent = waitS >= 0.1 ? `排队 ${waitS.toFixed(1)}s · 推理 ${runS.toFixed(1)}s` : '';
     }
   }
 }
@@ -515,14 +520,24 @@ async function renderJob(el, job, wallMs) {
     } catch {}
   }
 
+  const waitMs = (job.started_at_ms && job.created_at_ms) ? job.started_at_ms - job.created_at_ms : 0;
+  const runMs = (job.finished_at_ms && job.started_at_ms) ? job.finished_at_ms - job.started_at_ms : 0;
+  const decodeMs = t.decode_ms || 0;
+  const decTps = (decodeMs > 0 && res.completion_tokens) ? res.completion_tokens / (decodeMs / 1000) : 0;
+  el.querySelector('.dur').innerHTML = `<span class="dur-badge">总耗时 ${(wallMs / 1000).toFixed(2)} s</span>`;
   el.querySelector('.meta').innerHTML = [
-    `耗时 <b>${Math.round(t.e2e_ms || wallMs)} ms</b>`,
+    `服务端 e2e <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
+    `排队 <b>${Math.round(waitMs)} ms</b>`,
+    `执行 <b>${Math.round(runMs)} ms</b>`,
+    `├ 预处理 <b>${Math.round(t.preprocess_ms || 0)} ms</b>`,
+    `├ 推理 <b>${Math.round(t.inference_ms || 0)} ms</b>`,
+    `├ 解码 <b>${Math.round(decodeMs)} ms</b>${decTps ? ` (${decTps.toFixed(1)} tok/s)` : ''}`,
+    `└ 后处理 <b>${Math.round(t.postprocess_ms || 0)} ms</b>`,
     `tokens <b>${res.prompt_tokens ?? '?'} / ${res.completion_tokens ?? '?'}</b>`,
     `冷启动 <b>${job.cold_start ? '是' : '否'}</b>`,
     `处理尺寸 <b>${img.width ?? '?'}×${img.height ?? '?'}</b>`,
     img.resized ? `原图 <b>${img.original_width}×${img.original_height}</b>（已缩放）` : '',
     `框 <b>${boxes.length}</b>`,
-    `worker <b>${job.worker}</b>`,
   ].filter(Boolean).join(' · ');
 
   if (boxes.length) {

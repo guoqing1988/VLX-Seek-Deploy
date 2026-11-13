@@ -811,7 +811,8 @@ void VlxServer::run_job(Worker& w, const std::shared_ptr<Job>& job) {
                        {"inference_ms", t.inference_ms},
                        {"postprocess_ms", t.postprocess_ms},
                        {"serialization_ms", t.serialization_ms},
-                       {"e2e_ms", t.e2e_ms}};
+                       {"e2e_ms", t.e2e_ms},
+                       {"decode_ms", vlx_seek_result_decode_ms(w.ctx)}};
         }
     // 结果框坐标回到原图坐标系（模型看到的是缩小后的图）
     if (job->resized && err.empty() && job->orig_w > 0 && job->proc_w > 0) {
