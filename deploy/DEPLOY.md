@@ -291,7 +291,7 @@ python3 deploy/bench.py --precision q8_0 --image water_bottles_table.jpg \
 
 # 常驻推理服务（原生异步接口 + 并发 + 空闲卸载 + 自动重载）
 ./deploy/server/build-server.sh
-python3 deploy/server/test_server.py               # 29 项验收（自动起停服务）
+sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 59 项验收（需先让出显存）
 ./deploy/server/serve.sh --preload                 # 127.0.0.1:8100, 2 实例
 
 # 可选：纯文本 OpenAI 兼容服务（llama.cpp 原生 llama-server）

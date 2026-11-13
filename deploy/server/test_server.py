@@ -402,12 +402,33 @@ def phase_f() -> None:
         svc.stop()
 
 
+def gpu_free_mib() -> int:
+    """所有 GPU 的最小空闲显存（MiB）；查询失败返回大数（不阻塞测试）"""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        vals = [int(x.strip()) for x in out.splitlines() if x.strip().isdigit()]
+        return min(vals) if vals else 1 << 30
+    except Exception:
+        return 1 << 30
+
+
 def main() -> int:
     if not BIN.exists():
         print(f"缺少服务二进制：{BIN}\n先运行 deploy/server/build-server.sh")
         return 2
     if not IMAGE.exists():
         print(f"缺少测试图片：{IMAGE}")
+        return 2
+    # 验收测试会启动 2 实例并发（约 2×13 GiB）。宿主机已有服务占着显存时，
+    # 先提示停服务，避免把"显存不够"误判成功能回归。
+    free = gpu_free_mib()
+    need = 30000
+    if free < need and "--skip-gpu-check" not in sys.argv:
+        print(f"GPU 空闲显存不足：{free} MiB < {need} MiB")
+        print("验收测试会启动 2 实例并发。请先执行： sudo systemctl stop vlx-seek")
+        print("然后重跑；或加 --skip-gpu-check 忽略此检查。")
         return 2
     phase_a()
     phase_b()
