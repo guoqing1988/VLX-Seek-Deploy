@@ -128,7 +128,7 @@
 <div id="app" hidden>
   <header>
     <span class="title">VLX-Seek 1.5-10B</span>
-    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.12</span>
+    <span class="pill" title="页面版本，用于确认已刷新">v2026-11-13.13</span>
     <span class="pill" id="pHealth">状态…</span>
     <span class="pill" id="pQueue">队列 –</span>
     <span class="pill" id="pTps">TPS –</span>
@@ -364,7 +364,7 @@ async function refreshHealth() {
       return `<tr><td>#${w.worker}</td>
         <td><span class="wstate"><span class="dot ${cls}"></span>${w.state}${w.busy ? ' · busy' : ''}</span></td>
         <td>${w.device || '–'}</td>
-        <td>${w.load_ms ? Math.round(w.load_ms) + ' ms' : '–'}</td>
+        <td>${w.load_ms ? sec(w.load_ms) : '–'}</td>
         <td>${w.runs ?? 0}</td></tr>`;
     }).join('');
     $('#workersBody').innerHTML = rows || '<tr><td colspan="5">–</td></tr>';
@@ -386,8 +386,8 @@ async function refreshInfo() {
     $('#infoRaw').textContent = JSON.stringify(d.config, null, 2);
     $('#infoMeta').innerHTML = [
       `累计成功 <b>${d.stats.requests_ok}</b> / 失败 <b>${d.stats.requests_failed}</b>`,
-      `平均 inference <b>${Math.round(d.stats.avg_inference_ms)} ms</b>`,
-      `平均 e2e <b>${Math.round(d.stats.avg_e2e_ms)} ms</b>`,
+      `平均推理 <b>${sec(d.stats.avg_inference_ms)}</b>`,
+      `平均 e2e <b>${sec(d.stats.avg_e2e_ms)}</b>`,
       `加载 <b>${d.stats.model_loads}</b> 次`
     ].join(' · ');
   } catch (e) { $('#infoMeta').textContent = '读取失败：' + e.message; }
@@ -402,7 +402,7 @@ $('#reloadBtn').onclick = async () => {
     const d = await api('/v1/vlx/reload?wait=1', { method: 'POST' });
     const ok = (d.workers || []).filter((w) => w.loaded).length;
     $('#reloadMsg').textContent = `完成：${ok}/${(d.workers || []).length} 个实例已重载（` +
-      (d.workers || []).map((w) => `#${w.worker} ${w.loaded ? Math.round(w.load_ms) + 'ms' : w.state}`).join('，') + '）';
+      (d.workers || []).map((w) => `#${w.worker} ${w.loaded ? sec(w.load_ms) : w.state}`).join('，') + '）';
   } catch (e) {
     $('#reloadMsg').textContent = '重启失败：' + e.message;
   } finally {
@@ -606,6 +606,9 @@ async function submitOne(name, image) {
   }
 }
 
+// 耗时统一用秒显示（保留两位小数）
+function sec(ms) { return ((ms || 0) / 1000).toFixed(2) + ' s'; }
+
 function fmtTime(ms) {
   const d = new Date(ms);
   const p2 = (n) => String(n).padStart(2, '0');
@@ -651,16 +654,16 @@ function paintResult(el, job, wallMs, ts) {
     `图片 <b>${mb}</b>`,
     ts ? `生成时间 <b>${fmtTime(ts)}</b>` : '',
     `总耗时 <b>${(wallMs / 1000).toFixed(2)} s</b>`,
-    `服务端 <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
+    `服务端 <b>${sec(t.e2e_ms)}</b>`,
   ].filter(Boolean).join(' · ');
   el.querySelector('.meta').innerHTML = [
-    `服务端 e2e <b>${Math.round(t.e2e_ms || 0)} ms</b>`,
-    `排队 <b>${Math.round(waitMs)} ms</b>`,
-    `执行 <b>${Math.round(runMs)} ms</b>`,
-    `├ 预处理 <b>${Math.round(t.preprocess_ms || 0)} ms</b>`,
-    `├ 推理 <b>${Math.round(t.inference_ms || 0)} ms</b>`,
-    `├ 解码 <b>${Math.round(decodeMs)} ms</b>${decTps ? ` (${decTps.toFixed(1)} tok/s)` : ''}`,
-    `└ 后处理 <b>${Math.round(t.postprocess_ms || 0)} ms</b>`,
+    `服务端 e2e <b>${sec(t.e2e_ms)}</b>`,
+    `排队 <b>${sec(waitMs)}</b>`,
+    `执行 <b>${sec(runMs)}</b>`,
+    `├ 预处理 <b>${sec(t.preprocess_ms)}</b>`,
+    `├ 推理 <b>${sec(t.inference_ms)}</b>`,
+    `├ 解码 <b>${sec(decodeMs)}</b>${decTps ? ` (${decTps.toFixed(1)} tok/s)` : ''}`,
+    `└ 后处理 <b>${sec(t.postprocess_ms)}</b>`,
     `tokens <b>${res.prompt_tokens ?? '?'} / ${res.completion_tokens ?? '?'}</b>`,
     `冷启动 <b>${job.cold_start ? '是' : '否'}</b>`,
     `处理尺寸 <b>${img.width ?? '?'}×${img.height ?? '?'}</b>`,
