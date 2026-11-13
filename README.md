@@ -1,6 +1,6 @@
 # VLX-Seek-Deploy
 
-[VLX-Seek 1.5-10B](https://github.com/om-ai-lab/VLX-Seek)（GGUF / CUDA 后端）的**部署脚本与常驻推理服务**。
+[VLX-Seek 1.5-10B](https://github.com/Asher-1/VLX-Seek-GGML)（GGUF / CUDA 后端）的**部署脚本与常驻推理服务**。
 
 本仓库只包含部署层，不含上游源码与模型权重：
 
@@ -10,8 +10,11 @@
 - **常驻 HTTP 服务**：原生异步接口、多实例并发、懒加载、空闲自动卸载、多卡选择
 - systemd 托管（软链方式 + `.env` 环境变量）
 
-> 上游项目：<https://github.com/om-ai-lab/VLX-Seek>
-> 上游 C++/GGML 移植位于其 `cpp_ggml/` 目录。
+> 本部署依赖的源码（含 C++/GGML 后端 `cpp_ggml/`）：
+> <https://github.com/Asher-1/VLX-Seek-GGML>
+> 模型算法与原始 bf16 权重（官方）：<https://github.com/om-ai-lab/VLX-Seek>
+>
+> 注意：`cpp_ggml/` 只在 **VLX-Seek-GGML** 仓库里，`om-ai-lab/VLX-Seek` 没有这个目录。
 
 ---
 
@@ -46,11 +49,11 @@ deploy/
 | GPU | NVIDIA，实测 RTX 5880 Ada（sm_89）48 GB；单实例需 9–14 GiB 显存 |
 | CUDA | **编译/运行使用 toolkit 13.0.88**（`deploy/env.sh` 固定 `CUDA_HOME=/usr/local/cuda-13.0`，产物链接 `libcudart.so.13`）；用 `VLX_CUDA_ARCH` 指定架构，默认 `89`。`nvidia-smi` 报的 `CUDA Version: 13.0` 是驱动（580.173.02）支持上限，与本机 toolkit 一致；12.8 也验证过（输出逐 token 一致） |
 | 编译 | gcc 13、cmake ≥ 3.14、32 线程编译约 2 分钟 |
-| 上游源码 | `om-ai-lab/VLX-Seek`，且已 `git submodule update --init --recursive`（`cpp_ggml/third_party/llama.cpp`） |
+| 上游源码 | `Asher-1/VLX-Seek-GGML`（**必须用这个仓库**，它含 `cpp_ggml/`），且已 `git submodule update --init --recursive` |
 | 模型权重 | 4 个 GGUF，约 12.6 GiB（**不在本仓库**）：`vlx-10b-llm-q8_0`、`vlx-vision-10b-{f16,q8_0}`、`wedetect-base-uni-f32` |
 | 服务依赖 | 本机已验证：OpenSSL 开发包（HTTPS 图像 URL 需要）；无新增 Python 依赖 |
 
-模型可从 Hugging Face `omlab/VLX-Seek-1.5-10B-GGUF` 获取，放到任意目录后用 `VLX_GGUF_DIR` 指向。
+模型从 Hugging Face [`Asher-1/VLX-Seek-1.5-10B-GGUF`](https://huggingface.co/Asher-1/VLX-Seek-1.5-10B-GGUF) 获取，放到任意目录后用 `VLX_GGUF_DIR` 指向。
 
 ### 关于 CUDA 版本
 
@@ -64,7 +67,7 @@ deploy/
 
 ```bash
 # 1. 准备上游源码
-git clone https://github.com/om-ai-lab/VLX-Seek.git VLX-Seek-GGML
+git clone https://github.com/Asher-1/VLX-Seek-GGML.git VLX-Seek-GGML
 cd VLX-Seek-GGML
 git submodule update --init --recursive
 
@@ -93,8 +96,8 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
-./deploy/server/serve.sh --preload       # 默认 0.0.0.0:8110，2 实例，空闲 300s 卸载
-sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 65 项验收（先让出显存）
+./deploy/server/serve.sh --preload       # 0.0.0.0:8110（本机 .env；脚本默认 8100），2 实例
+python3 deploy/server/test_server.py     # 65 项验收；若已用 systemd 托管，先 sudo systemctl stop vlx-seek
 ```
 
 服务同时提供两套接口：**原生异步**（推荐，支持并发与长任务）和 **OpenAI 兼容**（同步，方便接现成 SDK）。
@@ -104,7 +107,7 @@ sudo systemctl stop vlx-seek && python3 deploy/server/test_server.py   # 65 项�
 ```bash
 curl -s localhost:8110/v1/vlx/infer -H 'Content-Type: application/json' -d '{
   "task":"detection","text":"orange; apple","lang":"zh",
-  "image":"https://example.com/a.jpg"}'          # 也支持 data: URL / base64
+  "image":"data:image/jpeg;base64,..."}'         # 也支持 http(s) URL / 裸 base64
 # → 202 {"job_id":"job-1","state":"queued", ...}
 
 curl -s localhost:8110/v1/vlx/jobs/job-1
@@ -162,7 +165,8 @@ POST /v1/vlx/infer
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8110/v1", api_key="not-needed")
+# 未启用 API key 时 api_key 可填任意值；启用后填 deploy/.env 里的 API_KEY
+client = OpenAI(base_url="http://127.0.0.1:8110/v1", api_key="sk-vlx-xxx")
 resp = client.chat.completions.create(
     model="vlx-seek-1.5-10b",
     messages=[{"role": "user", "content": [
@@ -202,13 +206,13 @@ curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
 | 后续请求 | 复用 ctx，热请求 0.5–0.7 s |
 | 空闲 `IDLE_UNLOAD_S`（默认 300） | 释放模型，显存回到 ~0.5 GiB |
 | 卸载后请求 | 自动重载 |
-| `--preload` | 启动即加载并预热（首请求也低延迟） |
+| `--preload` | 启动即加载并预热（首请求也低延迟）；本机 `deploy/.env` 的 `EXTRA_ARGS=--preload` 默认开启 |
 
 ### 并发
 
 `--instances N` = N 个独立模型上下文 = **N 路真正并行**（第 N+1 个请求排队）。
 
-- 每实例单线程串行；显存线性叠加（q8_0 下 9–14 GiB/实例，取决于输入分辨率）
+- 每实例单线程串行；显存线性叠加（服务模式 q8_0 约 11.7–14.4 GiB/实例，取决于输入分辨率；CLI 单请求峰值 9.5 GiB）
 - 2 实例实测：两个请求同时执行（766/771 ms），总 803 ms；第 3 个排队
 - 队列上限 `--max-queue`（默认 64），满则 429
 
@@ -267,7 +271,7 @@ cp deploy/.env.example deploy/.env      # 按需修改 HOST/PORT/GPU/INSTANCES/E
 
 ## 精度选择（q8_0 / f16）
 
-视觉链有 `f16` 和 `q8_0` 两套合并 GGUF；《LLM 只有 q8_0》，服务会自动回退。
+视觉链有 `f16` 和 `q8_0` 两套合并 GGUF；LLM 只有 q8_0，服务会自动回退。
 两种精度在 CLI 层（7/7 冒烟 + 压测）和服务层（同一张图）都实测过：
 
 | 配置 | 视觉 GGUF | 显存（服务，640×480 输入） | 端到端 | 输出 |
@@ -296,5 +300,5 @@ token 一致性由硬约束保证）。
 
 ## 许可
 
-部署脚本与本文档随上游 [VLX-Seek](https://github.com/om-ai-lab/VLX-Seek) 的许可使用；
-模型权重按其发布方的许可使用。
+部署脚本与本文档随上游 [VLX-Seek-GGML](https://github.com/Asher-1/VLX-Seek-GGML) 的
+**Apache License 2.0** 使用；模型权重按其发布方的许可使用。
