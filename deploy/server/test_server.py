@@ -48,10 +48,12 @@ def check(cond: bool, name: str, detail: str = "") -> None:
         print(f"  FAIL  {name}{('  ' + detail) if detail else ''}")
 
 
-def http(method: str, url: str, body: dict | None = None, timeout: float = 30):
+def http(method: str, url: str, body: dict | None = None, timeout: float = 30,
+         headers: dict | None = None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode()
@@ -72,7 +74,8 @@ def gpu_mem_for_pid(pid: int) -> int:
 
 
 class Service:
-    def __init__(self, port: int, instances: int, idle_s: int, tag: str):
+    def __init__(self, port: int, instances: int, idle_s: int, tag: str,
+                 args: list[str] | None = None):
         self.port = port
         self.base = f"http://127.0.0.1:{port}"
         self.tag = tag
@@ -80,8 +83,9 @@ class Service:
         env = dict(os.environ, INSTANCES=str(instances), IDLE_UNLOAD_S=str(idle_s),
                    PORT=str(port))
         self.log = open(HERE / f"test-{tag}.log", "w")
+        cmd = [str(HERE / "serve.sh"), "--log-level", "1"] + list(args or [])
         self.proc = subprocess.Popen(
-            [str(HERE / "serve.sh"), "--log-level", "1"], env=env,
+            cmd, env=env,
             stdout=self.log, stderr=subprocess.STDOUT)
         self.pid = self.proc.pid
 
@@ -109,10 +113,11 @@ class Service:
         code, text = http("POST", self.base + "/v1/vlx/infer", body)
         return code, json.loads(text)
 
-    def wait_job(self, job_id: str, timeout: float = 180) -> dict:
+    def wait_job(self, job_id: str, timeout: float = 180,
+                 headers: dict | None = None) -> dict:
         t0 = time.time()
         while time.time() - t0 < timeout:
-            code, text = http("GET", f"{self.base}/v1/vlx/jobs/{job_id}")
+            code, text = http("GET", f"{self.base}/v1/vlx/jobs/{job_id}", headers=headers)
             job = json.loads(text)
             if job["state"] in ("done", "failed", "cancelled"):
                 return job
@@ -312,6 +317,38 @@ def phase_d() -> None:
         big.unlink(missing_ok=True)
 
 
+def phase_e() -> None:
+    """API key 认证"""
+    print("\n=== Phase E：API key 认证 ===")
+    svc = Service(port=8115, instances=1, idle_s=0, tag="e",
+                  args=["--api-key", "smoke-key-1,smoke-key-2"])
+    try:
+        check(svc.wait_ready(), "带 API key 的服务启动")
+        check(http("GET", svc.base + "/healthz")[0] == 200, "/healthz 不需要 key（探活）")
+        check(http("GET", svc.base + "/v1/vlx/info")[0] == 401, "/v1/vlx/info 无 key 返回 401")
+        check(http("GET", svc.base + "/metrics")[0] == 401, "/metrics 无 key 返回 401")
+        check(http("POST", svc.base + "/v1/vlx/infer",
+                   {"task": "vqa", "text": "x", "image": "x"})[0] == 401,
+              "提交任务无 key 返回 401")
+        check(http("GET", svc.base + "/v1/vlx/info",
+                   headers={"Authorization": "Bearer wrong"})[0] == 401, "错误 key 返回 401")
+
+        code, body = http("POST", svc.base + "/v1/vlx/infer", {
+            "task": "detection", "text": "orange; apple", "lang": "zh",
+            "image": base64.b64encode(IMAGE.read_bytes()).decode()},
+            headers={"Authorization": "Bearer smoke-key-1"})
+        check(code == 202, "Bearer 正确 key 提交成功")
+        job = svc.wait_job(json.loads(body)["job_id"], timeout=240,
+                           headers={"Authorization": "Bearer smoke-key-1"})
+        check(job["state"] == "done", "认证后任务执行成功",
+              f"boxes={len((job.get('result') or {}).get('result_bbox_list', []))}")
+        check(http("GET", svc.base + "/v1/vlx/info",
+                   headers={"X-API-Key": "smoke-key-2"})[0] == 200,
+              "X-API-Key 头 + 第二个 key（轮换）可用")
+    finally:
+        svc.stop()
+
+
 def main() -> int:
     if not BIN.exists():
         print(f"缺少服务二进制：{BIN}\n先运行 deploy/server/build-server.sh")
@@ -323,6 +360,7 @@ def main() -> int:
     phase_b()
     phase_c()
     phase_d()
+    phase_e()
     print(f"\n=== 结果：PASS {PASS} / FAIL {FAIL} ===")
     return 0 if FAIL == 0 else 1
 

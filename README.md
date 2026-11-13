@@ -86,7 +86,7 @@ python3 deploy/bench.py --precision q8_0 f16 --repeats 3 --warm-runs 0
 ```bash
 ./deploy/server/build-server.sh          # 构建服务（独立 CMake 工程）
 ./deploy/server/serve.sh --preload       # 默认 0.0.0.0:8110，2 实例，空闲 300s 卸载
-python3 deploy/server/test_server.py     # 40 项验收（自动起停）
+python3 deploy/server/test_server.py     # 49 项验收（自动起停）
 ```
 
 接口是**原生异步**（提交任务 → 轮询结果），不是 OpenAI 兼容：
@@ -103,6 +103,20 @@ curl -s localhost:8110/v1/vlx/jobs/job-1
 ```
 
 运维接口：`GET /healthz`、`GET /v1/vlx/info`、`POST /v1/vlx/unload?wait=1`、`GET /metrics`。
+
+### API key 认证
+
+默认关闭；启用后保护 `/v1/vlx/*` 与 `/metrics`，`/healthz` 保持开放（探活）。
+
+```bash
+./deploy/server/serve.sh --api-key "sk-vlx-xxx"     # 或 deploy/.env 里 API_KEY=sk-vlx-xxx
+# 多个 key 轮换：API_KEY=key1,key2
+
+curl -H "Authorization: Bearer sk-vlx-xxx" localhost:8110/v1/vlx/info
+curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
+```
+
+未带或带错返回 `401` + `WWW-Authenticate: Bearer`；比较是恒定时间的，key 不出现在日志与 `/v1/vlx/info` 里。
 
 ### 生命周期
 
@@ -173,6 +187,20 @@ cp deploy/.env.example deploy/.env      # 按需修改 HOST/PORT/GPU/INSTANCES/E
 | 服务热请求 | **0.52–0.74 s** |
 | 服务冷启动（懒加载） | 2.9 s；卸载后首请求同 |
 | 2 实例显存 | 22.6 GiB（640×480 输入） |
+| 精度对比（服务） | q8_0 11.7 GiB / 472 ms；f16 12.4 GiB / 473 ms，输出一致 |
+
+## 精度选择（q8_0 / f16）
+
+视觉链有 `f16` 和 `q8_0` 两套合并 GGUF；《LLM 只有 q8_0》，服务会自动回退。
+两种精度在 CLI 层（7/7 冒烟 + 压测）和服务层（同一张图）都实测过：
+
+| 配置 | 视觉 GGUF | 显存（服务，640×480 输入） | 端到端 | 输出 |
+|---|---|---|---|---|
+| `--precision q8_0`（默认） | 1.35 GiB | 11.7 GiB | 472 ms | 7 框 |
+| `--precision f16` | 2.02 GiB | 12.4 GiB（+710 MiB） | 473 ms | 7 框，标签/坐标一致 |
+
+q8_0 更省显存与加载时间，是默认值；需要极致数值保真时用 f16（官方 parity 判据里 q8_0 是独立量化档，
+token 一致性由硬约束保证）。
 
 ## 上游修复
 

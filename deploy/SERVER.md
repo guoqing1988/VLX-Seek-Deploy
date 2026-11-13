@@ -61,6 +61,7 @@ HOST=0.0.0.0 PORT=8200 INSTANCES=4 ./deploy/server/serve.sh --log-level 0
 #   --max-image-mb N     URL 下载图像上限 [16]
 #   --image-url-timeout-s N  URL 下载超时秒 [10]
 #   --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy，本机地址不走代理）
+#   --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）
 #   --max-image-tokens N 图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]
 #   --log-level N        0=DEBUG 1=INFO 2=WARN 3=ERROR [1]
 ```
@@ -173,6 +174,29 @@ GPU=1 PORT=8111 INSTANCES=2 ./deploy/server/serve.sh --preload
   （实测 `--gpu 1` 在单卡机器上就是这条）。
 - 不指定时用默认卡（第 0 张 / 全部可见）。`--device cpu` 下该参数无意义。
 
+### 3.2.2 API key 认证
+
+默认关闭；启用后保护 `/v1/vlx/*` 与 `/metrics`，**`/healthz` 保持开放**（探活用）。
+
+```bash
+# 启用（二选一）
+./deploy/server/serve.sh --api-key "sk-vlx-xxx"
+# 或 deploy/.env（systemd 读这个）
+API_KEY=sk-vlx-xxx
+# 多个 key 轮换（逗号分隔）
+API_KEY=key1,key2
+```
+
+```bash
+# 客户端两种头都支持
+curl -H "Authorization: Bearer sk-vlx-xxx" localhost:8110/v1/vlx/info
+curl -H "X-API-Key: sk-vlx-xxx"           localhost:8110/v1/vlx/info
+```
+
+- 未带/带错：`401` + `WWW-Authenticate: Bearer`，响应体 `{"error":"missing or invalid API key"}`
+- 比较是恒定时间的；key 不写日志，`/v1/vlx/info` 只暴露 `auth_enabled` 与头格式，不回显 key
+- 修改 `.env` 后 `./deploy/install-service.sh restart`
+
 ### 3.3 运维接口
 
 | 接口 | 说明 |
@@ -180,13 +204,14 @@ GPU=1 PORT=8111 INSTANCES=2 ./deploy/server/serve.sh --preload
 | `GET /healthz` | `model_loaded`、每 worker 的 `state/busy/load_ms/runs`、`queue_depth`。**不触发加载** |
 | `GET /v1/vlx/info` | 配置 + 每 worker 状态 + 累计统计（ok/failed/cancelled、加载次数、平均 inference/e2e） |
 | `POST /v1/vlx/unload?wait=1&timeout_ms=30000` | 强制卸载；`wait=1` 等到 worker 真正释放 |
-| `GET /metrics` | Prometheus 文本：队列深度、请求数、加载/卸载次数、token 累计、每 worker 状态 |
+| `GET /metrics` | Prometheus 文本：队列深度、请求数、加载/卸载次数、token 累计、每 worker 状态（启用 API key 时需带凭证） |
 
 ### 3.4 错误码
 
 | HTTP | 场景 |
 |---|---|
 | 400 | JSON 非法 / task 未知 / image 缺失或 base64 非法 / bbox 格式错 / 区域任务缺参数 / 传了 `max_new_tokens` 或 `temperature` |
+| 401 | 启用了 API key 但未带/带错凭证（`/healthz` 除外） |
 | 404 | job 不存在 |
 | 409 | 取消一个正在运行的任务 |
 | 429 | 队列已满（`--max-queue`） |
@@ -337,7 +362,7 @@ GPU=1 PORT=8111 INSTANCES=2 ./deploy/server/serve.sh --preload
   改 unit 文件后 `daemon-reload` 即生效，避免两份文件不同步。
 - **环境变量**：`deploy/.env`（systemd `EnvironmentFile`，`KEY=value` 格式），模板见 `deploy/.env.example`；
   `.env` 被 git 忽略，模板入库。支持
-  `HOST/PORT/GPU/INSTANCES/IDLE_UNLOAD_S/PRECISION/DEVICE/IMAGE_PROXY/EXTRA_ARGS`。
+  `HOST/PORT/GPU/INSTANCES/IDLE_UNLOAD_S/PRECISION/DEVICE/IMAGE_PROXY/API_KEY/EXTRA_ARGS`。
 - **默认监听 `0.0.0.0`**（不再只绑本机）：上线前确认防火墙/安全组，或把 `deploy/.env` 的 `HOST` 改回 `127.0.0.1`。
 - 日志：`journalctl -u vlx-seek -f`；异常退出 `Restart=on-failure`；`systemctl stop` 会走 SIGTERM 释放模型。
 
@@ -364,6 +389,7 @@ python3 deploy/server/test_server.py    # 29 项断言，自动起停服务
 覆盖：冷启动不加载 → 首请求冷启动标记/加载耗时/结果框 → 不同尺寸连续请求（bug #3 回归）→
 热请求延迟 → 空闲卸载（显示 + 显存归零）→ 卸载后自动重载 → 手动卸载 → /metrics →
 2 实例并发（不同 worker）→ 取消排队任务 → /v1/vlx/info 统计 → URL 图像输入/404/协议校验 →
-2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图。
+2560×1920 自动缩放 + 处理尺寸 ≤1280 + 坐标映射回原图 →
+API key：healthz 豁免、无 key/错 key 401、Bearer 与 X-API-Key、多 key 轮换。
 
-最近一次结果：`PASS 40 / FAIL 0`（含大图自动缩放；无 PIL 时该组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。
+最近一次结果：`PASS 49 / FAIL 0`（含大图自动缩放与 API key 认证；无 PIL 时大图组跳过）（日志在 `deploy/server/test-a.log`、`test-b.log`）。

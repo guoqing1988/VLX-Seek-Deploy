@@ -183,6 +183,20 @@ void resize_rgb_bilinear(const uint8_t* src, int sw, int sh, int dw, int dh,
     }
 }
 
+// 恒定时间字符串比较（避免逐字节提前退出泄漏 key）
+bool ct_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    unsigned char d = 0;
+    for (size_t i = 0; i < a.size(); ++i) d |= static_cast<unsigned char>(a[i] ^ b[i]);
+    return d == 0;
+}
+
+std::string trim_ws(std::string v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t' || v.front() == '\r')) v.erase(v.begin());
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r')) v.pop_back();
+    return v;
+}
+
 // ---------------- 配置 ----------------
 struct ServerOptions {
     std::string host = "0.0.0.0";
@@ -205,6 +219,7 @@ struct ServerOptions {
     int max_image_tokens = 1200;  // 超过即等比缩小（1200 ≈ 1280x960，1.2 MP）
     int image_url_timeout_s = 10; // URL 下载超时
     std::string image_proxy;      // 可选 HTTP(S) 代理 host:port（默认读环境变量）
+    std::string api_key;          // 空 = 不启用认证；支持逗号分隔的多个 key（轮换）
     int log_level = 1;
 };
 
@@ -297,6 +312,7 @@ class VlxServer {
     void run_job(Worker& w, const std::shared_ptr<Job>& job);
     vlx_seek_ctx* load_ctx(std::string* err);
     bool fetch_image_url(const std::string& url, std::string* out, std::string* err) const;
+    bool authorized(const httplib::Request& req) const;
     void warmup_ctx(vlx_seek_ctx* ctx);
     void unload_ctx(Worker& w);
     void maybe_unload(Worker& w);
@@ -854,6 +870,17 @@ void VlxServer::cleanup_jobs() {
 // HTTP
 // ============================================================================
 void VlxServer::install_routes() {
+    http_.set_pre_routing_handler([this](const httplib::Request& req,
+                                         httplib::Response& res) {
+        if (authorized(req)) return httplib::Server::HandlerResponse::Unhandled;
+        res.status = 401;
+        res.set_header("WWW-Authenticate", "Bearer");
+        res.set_content(json{{"error", "missing or invalid API key"},
+                             {"hint", "Authorization: Bearer <key> or X-API-Key: <key>"}}
+                            .dump(),
+                        "application/json");
+        return httplib::Server::HandlerResponse::Handled;
+    });
     http_.new_task_queue = [] { return new httplib::ThreadPool(16); };
     http_.set_payload_max_length(size_t(opts_.max_body_mb) * 1024 * 1024);
     http_.set_read_timeout(300, 0);
@@ -887,6 +914,31 @@ void VlxServer::install_routes() {
                             "application/json");
         }
     });
+}
+
+// API key 校验：Authorization: Bearer <key> 或 X-API-Key: <key>。
+// /healthz 豁免（探活不需要凭证）；其余 /v1/* 与 /metrics 全部保护。
+// 配置为空 = 不启用认证。支持逗号分隔的多个 key，便于轮换。
+bool VlxServer::authorized(const httplib::Request& req) const {
+    if (opts_.api_key.empty()) return true;
+    if (req.path == "/healthz") return true;
+    std::string token;
+    const std::string auth = req.get_header_value("Authorization");
+    if (auth.rfind("Bearer ", 0) == 0) {
+        token = trim_ws(auth.substr(7));
+    } else {
+        token = trim_ws(req.get_header_value("X-API-Key"));
+    }
+    if (token.empty()) return false;
+    size_t p = 0;
+    while (p <= opts_.api_key.size()) {
+        size_t q = opts_.api_key.find(',', p);
+        if (q == std::string::npos) q = opts_.api_key.size();
+        const std::string k = trim_ws(opts_.api_key.substr(p, q - p));
+        if (!k.empty() && ct_equal(token, k)) return true;
+        p = q + 1;
+    }
+    return false;
 }
 
 // 下载 http(s) 图像。生产环境请配合网络隔离/白名单（服务端会主动出网）。
@@ -1270,6 +1322,8 @@ void VlxServer::handle_health(const httplib::Request&, httplib::Response& res) {
 std::string VlxServer::models_info_json() const {
     return json{{"device", opts_.device},
                 {"gpu", opts_.gpu.empty() ? json(nullptr) : json(opts_.gpu)},
+                {"auth_enabled", !opts_.api_key.empty()},
+                {"auth_header", opts_.api_key.empty() ? json(nullptr) : json("Authorization: Bearer <key>")},
                 {"cuda_visible_devices",
                  std::getenv("CUDA_VISIBLE_DEVICES") ? json(std::getenv("CUDA_VISIBLE_DEVICES"))
                                                       : json(nullptr)},
@@ -1428,6 +1482,7 @@ void usage() {
                  "  --max-image-tokens N     图像 token 预算，超出等比缩小 [1200 ≈ 1280x960]\n"
                  "  --image-url-timeout-s N  URL 下载超时秒 [10]\n"
                  "  --image-proxy HOST:PORT  URL 下载代理（默认读 https_proxy/http_proxy）\n"
+                 "  --api-key KEY            启用 API key 认证（多个用逗号分隔；默认读环境变量 API_KEY）\n"
                  "  --log-level N            0=DEBUG 1=INFO 2=WARN 3=ERROR [1]\n",
                  kVersion);
 }
@@ -1465,6 +1520,7 @@ bool parse_args(int argc, char** argv, ServerOptions* o) {
         else if (a == "--max-image-tokens") o->max_image_tokens = std::atoi(next("--max-image-tokens").c_str());
         else if (a == "--image-url-timeout-s") o->image_url_timeout_s = std::atoi(next("--image-url-timeout-s").c_str());
         else if (a == "--image-proxy") o->image_proxy = next("--image-proxy");
+        else if (a == "--api-key") o->api_key = next("--api-key");
         else if (a == "--log-level") o->log_level = std::atoi(next("--log-level").c_str());
         else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
@@ -1501,6 +1557,18 @@ int main(int argc, char** argv) {
         if (env && *env) opts.image_proxy = env;
     }
     if (!opts.image_proxy.empty()) logmsg(1, "image URL proxy: %s", opts.image_proxy.c_str());
+    if (opts.api_key.empty()) {
+        const char* env = std::getenv("VLX_API_KEY");
+        if (!env || !*env) env = std::getenv("API_KEY");
+        if (env && *env) opts.api_key = env;
+    }
+    if (opts.api_key.empty()) {
+        logmsg(1, "API key: disabled (no --api-key / API_KEY)");
+    } else {
+        size_t n = 1;
+        for (char c : opts.api_key) n += (c == ',');
+        logmsg(1, "API key: enabled (%zu key%s); /healthz stays open", n, n == 1 ? "" : "s");
+    }
 
     // GPU 选择：必须在任何 CUDA/ggml 初始化之前设置（进程级生效，视觉链与
     // llama.cpp 都只看到这一张卡）。外部已设置 CUDA_VISIBLE_DEVICES 时以命令行优先。
